@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="640" viewBox="0 0 920 640">
+  <defs>
+    <style>
+      .title { font: bold 18px 'Segoe UI', Arial, sans-serif; fill: #172b4d; }
+      .subtitle { font: 12px 'Segoe UI', Arial, sans-serif; fill: #44546f; }
+      .box-title { font: bold 13px 'Segoe UI', Arial, sans-serif; fill: #fff; }
+      .field { font: 12px 'Consolas', monospace; fill: #172b4d; }
+      .caption { font: 13px 'Segoe UI', Arial, sans-serif; fill: #172b4d; }
+      .arrow { stroke: #42526e; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#42526e"/>
+    </marker>
+  </defs>
+  <rect width="920" height="640" fill="#f8fafc"/>
+  <text x="460" y="32" text-anchor="middle" class="title">workSphere  Database Relationship Diagram</text>
+  <text x="460" y="52" text-anchor="middle" class="subtitle">Fig. 5.1 Database Relationship Diagram</text>
+
+  <!-- users -->
+  <rect x="340" y="70" width="240" height="130" rx="8" fill="#0c66e4" stroke="#0747a6" stroke-width="2"/>
+  <text x="460" y="95" text-anchor="middle" class="box-title">users</text>
+  <rect x="350" y="105" width="220" height="85" rx="4" fill="#fff"/>
+  <text x="360" y="125" class="field">id (PK)</text>
+  <text x="360" y="143" class="field">name</text>
+  <text x="360" y="161" class="field">email (UNIQUE)</text>
+  <text x="360" y="179" class="field">password_hash, created_at</text>
+
+  <!-- collab_rooms -->
+  <rect x="340" y="240" width="240" height="150" rx="8" fill="#1d7afc" stroke="#0747a6" stroke-width="2"/>
+  <text x="460" y="265" text-anchor="middle" class="box-title">collab_rooms</text>
+  <rect x="350" y="275" width="220" height="105" rx="4" fill="#fff"/>
+  <text x="360" y="295" class="field">id (PK)</text>
+  <text x="360" y="313" class="field">name</text>
+  <text x="360" y="331" class="field">created_at</text>
+  <text x="360" y="349" class="field">invite_token</text>
+  <text x="360" y="367" class="field">member_limit</text>
+
+  <!-- collab_members -->
+  <rect x="40" y="430" width="250" height="150" rx="8" fill="#36b37e" stroke="#1f845a" stroke-width="2"/>
+  <text x="165" y="455" text-anchor="middle" class="box-title">collab_members</text>
+  <rect x="50" y="465" width="230" height="105" rx="4" fill="#fff"/>
+  <text x="60" y="485" class="field">id (PK)</text>
+  <text x="60" y="503" class="field">room_id (FK)</text>
+  <text x="60" y="521" class="field">email, name</text>
+  <text x="60" y="539" class="field">joined_at</text>
+  <text x="60" y="557" class="field">UNIQUE(room_id, email)</text>
+
+  <!-- collab_messages -->
+  <rect x="335" y="430" width="250" height="170" rx="8" fill="#6554c0" stroke="#403294" stroke-width="2"/>
+  <text x="460" y="455" text-anchor="middle" class="box-title">collab_messages</text>
+  <rect x="345" y="465" width="230" height="125" rx="4" fill="#fff"/>
+  <text x="355" y="485" class="field">id (PK)</text>
+  <text x="355" y="503" class="field">room_id (FK)</text>
+  <text x="355" y="521" class="field">author_email, author_name</text>
+  <text x="355" y="539" class="field">body, created_at</text>
+  <text x="355" y="557" class="field">attachment_*, updated_at</text>
+  <text x="355" y="575" class="field">deleted_at</text>
+
+  <!-- collab_email_invites -->
+  <rect x="630" y="430" width="250" height="150" rx="8" fill="#ff5630" stroke="#bf2600" stroke-width="2"/>
+  <text x="755" y="455" text-anchor="middle" class="box-title">collab_email_invites</text>
+  <rect x="640" y="465" width="230" height="105" rx="4" fill="#fff"/>
+  <text x="650" y="485" class="field">id (PK)</text>
+  <text x="650" y="503" class="field">room_id (FK)</text>
+  <text x="650" y="521" class="field">invitee_email</text>
+  <text x="650" y="539" class="field">inviter_email, inviter_name</text>
+  <text x="650" y="557" class="field">accept_token, status</text>
+
+  <!-- arrows users to rooms (logical link) -->
+  <path d="M 460 200 L 460 235" class="arrow"/>
+  <text x="470" y="222" class="subtitle">linked by email</text>
+
+  <!-- rooms to children -->
+  <path d="M 400 390 L 165 425" class="arrow"/>
+  <path d="M 460 390 L 460 425" class="arrow"/>
+  <path d="M 520 390 L 755 425" class="arrow"/>
+  <text x="250" y="410" class="subtitle">1 : N</text>
+  <text x="455" y="410" class="subtitle">1 : N</text>
+  <text x="640" y="410" class="subtitle">1 : N</text>
+
+  <!-- flow strip -->
+  <rect x="60" y="595" width="800" height="32" rx="6" fill="#e9f2ff" stroke="#b3d4ff"/>
+  <text x="460" y="615" text-anchor="middle" class="caption">User � SQLite (rooms, members, messages, invites) � Express API</text>
+</svg>

@@ -43,6 +43,10 @@ export default defineConfig({
         target: 'http://127.0.0.1:8787',
         changeOrigin: true,
       },
+      '/meet-ws': {
+        target: 'ws://127.0.0.1:8787',
+        ws: true,
+      },
     },
   },
   preview: {
@@ -54,6 +58,10 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:8787',
         changeOrigin: true,
+      },
+      '/meet-ws': {
+        target: 'ws://127.0.0.1:8787',
+        ws: true,
       },
     },
   },

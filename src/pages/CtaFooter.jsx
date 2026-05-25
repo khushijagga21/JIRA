@@ -5,10 +5,10 @@ export default function CtaFooter() {
     <>
       <section className="cta" id="tour-cta">
         <div className="container cta-inner">
-          <h2 className="cta-title">Transform the way you work</h2>
+          <h2 className="cta-title">Help your team collaborate with confidence</h2>
           <p className="cta-desc">
-            Bring your projects, priorities, and team into one place—built for developers who need
-            to track work and ship reliably.
+            Bring conversations, priorities, and delivery into one calm workspace—so everyone stays
+            aligned from first idea to final release.
           </p>
           <a className="btn btn-amber" href="#">
             Get it free

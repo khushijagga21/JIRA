@@ -1,48 +1,43 @@
+const ROLES = [
+  {
+    key: 'product',
+    title: 'Product & design',
+    desc: 'Share specs, gather feedback in threads, and keep engineering aligned on what ships next—without another alignment meeting.',
+    tone: 'product',
+  },
+  {
+    key: 'engineering',
+    title: 'Engineering',
+    desc: 'See blockers early, coordinate in context on tickets, and hand off work with full history—so nobody repeats the same question twice.',
+    tone: 'engineering',
+  },
+  {
+    key: 'leadership',
+    title: 'Leads & stakeholders',
+    desc: 'Get an honest picture of progress and risk from one workspace—support the team without interrupting deep work.',
+    tone: 'leadership',
+  },
+]
+
 export default function Teams() {
   return (
-    <section className="teams teams-hero" id="teams">
-        <div className="container">
-          <h1 className="teams-title">How your team uses workSphere day to day</h1>
-
-          <div className="teams-cards" role="list">
-            <article className="teams-card" role="listitem">
-              <div className="teams-avatar dev" aria-hidden="true"></div>
-              <h2 className="teams-card-title">Developer</h2>
-              <p className="teams-card-desc">
-                Reduce context switching and spend more time building cool software. We’ll handle the
-                processes and workflows for you.
-              </p>
-              <a className="teams-cta" href="#">
-                Get started <span aria-hidden="true">→</span>
-              </a>
+    <section className="teams teams-v2" id="teams">
+      <div className="container">
+        <p className="teams-v2-eyebrow">Collaboration by role</p>
+        <h2 className="teams-v2-title">How different teammates use workSphere together</h2>
+        <p className="teams-v2-lead">
+          Everyone works from the same source of truth—whether they’re planning, building, or reviewing delivery.
+        </p>
+        <div className="teams-v2-grid" role="list">
+          {ROLES.map((r) => (
+            <article key={r.key} className={`teams-v2-card teams-v2-card--${r.tone}`} role="listitem">
+              <div className={`teams-v2-avatar teams-v2-avatar--${r.tone}`} aria-hidden />
+              <h3 className="teams-v2-card-title">{r.title}</h3>
+              <p className="teams-v2-card-desc">{r.desc}</p>
             </article>
-
-            <article className="teams-card" role="listitem">
-              <div className="teams-avatar platform" aria-hidden="true"></div>
-              <h2 className="teams-card-title">Platform engineer</h2>
-              <p className="teams-card-desc">
-                Manage delivery of platform-spanning features alongside your product development
-                counterparts.
-              </p>
-              <a className="teams-cta" href="#">
-                Get started <span aria-hidden="true">→</span>
-              </a>
-            </article>
-
-            <article className="teams-card" role="listitem">
-              <div className="teams-avatar leadership" aria-hidden="true"></div>
-              <h2 className="teams-card-title">Engineering leadership</h2>
-              <p className="teams-card-desc">
-                Understand development progress - without the shoulder taps - so your teams can stay
-                focused on tasks at hand.
-              </p>
-              <a className="teams-cta" href="#">
-                Get started <span aria-hidden="true">→</span>
-              </a>
-            </article>
-          </div>
+          ))}
         </div>
-      </section>
+      </div>
+    </section>
   )
 }
-

@@ -1,220 +1,495 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+
 import { createPortal } from 'react-dom'
+
 import { useLocation } from 'react-router-dom'
+
 import workSphereLogo from '../assets/worksphere-logo.png'
-import { getBotReply, getBotReplyForImage, getQuickTopics } from '../utils/chatbot.js'
+
+import { assistantErrorMessage, requestAssistantReply } from '../utils/assistantApi.js'
+
+import { getBotReply, getQuickTopics } from '../utils/chatbot.js'
+
+import {
+
+  CHAT_STORAGE_KEY,
+
+  createInitialMessages,
+
+  normalizeStoredMessages,
+
+  toApiMessages,
+
+} from '../utils/chatMessages.js'
+
+import ChatMessageContent from './ChatMessageContent.jsx'
+
+
 
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024
 
-function createInitialMessages() {
-  return [
-    {
-      id: globalThis.crypto?.randomUUID?.() ?? String(Date.now()),
-      role: 'bot',
-      text: 'Hi! I’m the workSphere assistant. Ask me about workflows, tickets, reporting, or how to use this site.',
-      ts: Date.now(),
-    },
-  ]
-}
-
-function appendChatExchange(setMessages, rawText, replyFn) {
-  const trimmed = String(rawText ?? '').trim()
-  if (!trimmed) return
-  const now = Date.now()
-  const userMsg = {
-    id: globalThis.crypto?.randomUUID?.() ?? `u-${now}-${Math.random()}`,
-    role: 'user',
-    text: trimmed,
-    ts: now,
-  }
-  const botMsg = {
-    id: globalThis.crypto?.randomUUID?.() ?? `b-${now}-${Math.random()}`,
-    role: 'bot',
-    text: replyFn(trimmed),
-    ts: now + 1,
-  }
-  setMessages((m) => [...m, userMsg, botMsg])
-}
-
-function appendImageExchange(setMessages, imageSrc, caption) {
-  const trimmed = String(caption ?? '').trim()
-  const now = Date.now()
-  const userMsg = {
-    id: globalThis.crypto?.randomUUID?.() ?? `u-${now}-${Math.random()}`,
-    role: 'user',
-    text: trimmed,
-    imageSrc,
-    ts: now,
-  }
-  const botMsg = {
-    id: globalThis.crypto?.randomUUID?.() ?? `b-${now}-${Math.random()}`,
-    role: 'bot',
-    text: getBotReplyForImage(trimmed),
-    ts: now + 1,
-  }
-  setMessages((m) => [...m, userMsg, botMsg])
-}
-
-function formatMarkdownLite(text) {
-  // Minimal formatting: **bold** and newlines → <br/>
-  const parts = String(text ?? '').split('\n')
-  return parts.map((line, idx) => {
-    const segments = []
-    let rest = line
-    while (rest.includes('**')) {
-      const start = rest.indexOf('**')
-      const end = rest.indexOf('**', start + 2)
-      if (end === -1) break
-      const before = rest.slice(0, start)
-      const bold = rest.slice(start + 2, end)
-      if (before) segments.push({ t: 'text', v: before })
-      segments.push({ t: 'bold', v: bold })
-      rest = rest.slice(end + 2)
-    }
-    if (rest) segments.push({ t: 'text', v: rest })
-
-    return (
-      <div key={idx} className="cb-line">
-        {segments.map((s, i) =>
-          s.t === 'bold' ? <strong key={i}>{s.v}</strong> : <span key={i}>{s.v}</span>,
-        )}
-      </div>
-    )
-  })
-}
-
 const INTRO_STORAGE_KEY = 'worksphere_chat_intro_dismissed'
 
+
+
+function loadStoredMessages() {
+
+  try {
+
+    const raw = window.localStorage.getItem(CHAT_STORAGE_KEY)
+
+    const parsed = raw ? JSON.parse(raw) : null
+
+    const normalized = normalizeStoredMessages(parsed)
+
+    if (normalized?.length) return normalized
+
+  } catch {
+
+    // ignore
+
+  }
+
+  try {
+
+    const legacy = window.localStorage.getItem('worksphere_chat_messages')
+
+    const normalized = normalizeStoredMessages(legacy ? JSON.parse(legacy) : null)
+
+    if (normalized?.length) return normalized
+
+  } catch {
+
+    // ignore
+
+  }
+
+  return createInitialMessages()
+
+}
+
+
+
 export default function ChatbotWidget() {
+
   const { pathname } = useLocation()
+
   const isAuthPage = pathname === '/login' || pathname === '/signup'
 
+
+
   const [open, setOpen] = useState(false)
+
   const [showIntro, setShowIntro] = useState(() => {
+
     try {
+
       return !window.localStorage.getItem(INTRO_STORAGE_KEY)
+
     } catch {
+
       return true
+
     }
+
   })
+
   const [input, setInput] = useState('')
-  const [messages, setMessages] = useState(() => {
-    try {
-      const raw = window.localStorage.getItem('worksphere_chat_messages')
-      const parsed = raw ? JSON.parse(raw) : null
-      if (Array.isArray(parsed) && parsed.length) return parsed
-    } catch {
-      // ignore
-    }
-    return createInitialMessages()
-  })
+
+  const [loading, setLoading] = useState(false)
+
+  const [messages, setMessages] = useState(loadStoredMessages)
+
+
 
   const quickTopics = useMemo(() => getQuickTopics(), [])
+
   const listRef = useRef(null)
+
   const fileInputRef = useRef(null)
 
+  const sendingRef = useRef(false)
+
+
+
   useEffect(() => {
-    const slice = messages.slice(-60)
+
+    const slice = messages.slice(-40)
+
     try {
-      window.localStorage.setItem('worksphere_chat_messages', JSON.stringify(slice))
+
+      window.localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(slice))
+
     } catch {
+
       try {
+
         const withoutImages = slice.map((m) =>
+
           m.imageSrc
-            ? { ...m, imageSrc: undefined, text: (m.text ?? '').trim() || '📷 Image (reload cleared attachment)' }
+
+            ? { ...m, imageSrc: undefined, text: (m.text ?? '').trim() || '📷 Image (attachment cleared on save)' }
+
             : m,
+
         )
-        window.localStorage.setItem('worksphere_chat_messages', JSON.stringify(withoutImages))
+
+        window.localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(withoutImages))
+
       } catch {
+
         // ignore
+
       }
+
     }
+
   }, [messages])
 
-  useEffect(() => {
-    if (!open) return
-    const t = setTimeout(() => {
-      listRef.current?.scrollTo?.({ top: listRef.current.scrollHeight, behavior: 'smooth' })
-    }, 40)
-    return () => clearTimeout(t)
-  }, [open, messages.length])
 
-  function send(text) {
-    appendChatExchange(setMessages, text, getBotReply)
-    setInput('')
+
+  useEffect(() => {
+
+    if (!open) return
+
+    const t = setTimeout(() => {
+
+      listRef.current?.scrollTo?.({ top: listRef.current.scrollHeight, behavior: 'smooth' })
+
+    }, 40)
+
+    return () => clearTimeout(t)
+
+  }, [open, messages.length, loading])
+
+
+
+  async function requestReply(nextMessages, lastUserText) {
+
+    const apiMessages = toApiMessages(nextMessages)
+
+    if (!apiMessages.length) {
+
+      return 'I didn’t catch your message—please type a question and press Send.'
+
+    }
+
+
+
+    setLoading(true)
+
+    try {
+
+      return await requestAssistantReply(apiMessages)
+
+    } catch (err) {
+
+      const apiErr = assistantErrorMessage(err)
+
+      if (lastUserText) {
+
+        const local = getBotReply(lastUserText)
+
+        if (local && !/try asking one of these/i.test(local)) {
+
+          return `${apiErr}\n\n---\n\n**Meanwhile, here’s guidance from workSphere:**\n\n${local}`
+
+        }
+
+      }
+
+      return apiErr
+
+    } finally {
+
+      setLoading(false)
+
+    }
+
   }
+
+
+
+  async function send(text) {
+
+    const trimmed = String(text ?? '').trim()
+
+    if (!trimmed || loading || sendingRef.current) return
+
+
+
+    sendingRef.current = true
+
+    const now = Date.now()
+
+    const userMsg = {
+
+      id: globalThis.crypto?.randomUUID?.() ?? `u-${now}`,
+
+      role: 'user',
+
+      text: trimmed,
+
+      ts: now,
+
+    }
+
+
+
+    const historyWithUser = [...messages, userMsg]
+
+    setMessages(historyWithUser)
+
+    setInput('')
+
+
+
+    try {
+
+      const reply = await requestReply(historyWithUser, trimmed)
+
+      const botMsg = {
+
+        id: globalThis.crypto?.randomUUID?.() ?? `b-${now}`,
+
+        role: 'bot',
+
+        text: reply,
+
+        ts: Date.now(),
+
+      }
+
+      setMessages((m) => [...m, botMsg])
+
+    } finally {
+
+      sendingRef.current = false
+
+    }
+
+  }
+
+
 
   function onSubmit(e) {
+
     e.preventDefault()
-    send(input)
+
+    void send(input)
+
   }
+
+
+
+  function onInputKeyDown(e) {
+
+    if (e.key !== 'Enter' || e.shiftKey) return
+
+    e.preventDefault()
+
+    if (!input.trim() || loading) return
+
+    void send(input)
+
+  }
+
+
 
   function dismissIntro() {
+
     setShowIntro(false)
+
     try {
+
       window.localStorage.setItem(INTRO_STORAGE_KEY, '1')
+
     } catch {
+
       // ignore
+
     }
+
   }
+
+
 
   function toggleChat() {
+
     setOpen((v) => {
+
       const next = !v
+
       if (next) dismissIntro()
+
       return next
+
     })
+
   }
+
+
 
   function startNewChat() {
+
     const next = createInitialMessages()
+
     setMessages(next)
+
     setInput('')
+
+    setLoading(false)
+
+    sendingRef.current = false
+
     try {
-      window.localStorage.setItem('worksphere_chat_messages', JSON.stringify(next))
+
+      window.localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(next))
+
+      window.localStorage.removeItem('worksphere_chat_messages')
+
     } catch {
+
       // ignore
+
     }
+
   }
 
-  function onPickImage(e) {
+
+
+  async function onPickImage(e) {
+
     const file = e.target.files?.[0]
+
     e.target.value = ''
-    if (!file || !file.type.startsWith('image/')) return
+
+    if (!file || !file.type.startsWith('image/') || loading || sendingRef.current) return
+
     if (file.size > MAX_IMAGE_BYTES) {
+
       window.alert('Please choose an image under 2 MB.')
+
       return
+
     }
+
+
+
+    sendingRef.current = true
+
     const reader = new FileReader()
+
     reader.onload = () => {
-      const dataUrl = typeof reader.result === 'string' ? reader.result : ''
-      if (!dataUrl) return
-      appendImageExchange(setMessages, dataUrl, input)
-      setInput('')
+
+      void (async () => {
+
+        const dataUrl = typeof reader.result === 'string' ? reader.result : ''
+
+        if (!dataUrl) {
+
+          sendingRef.current = false
+
+          return
+
+        }
+
+        const caption = input.trim()
+
+        const now = Date.now()
+
+        const userMsg = {
+
+          id: globalThis.crypto?.randomUUID?.() ?? `u-${now}`,
+
+          role: 'user',
+
+          text: caption || 'What is in this image?',
+
+          imageSrc: dataUrl,
+
+          ts: now,
+
+        }
+
+        const historyWithUser = [...messages, userMsg]
+
+        setMessages(historyWithUser)
+
+        setInput('')
+
+
+
+        try {
+
+          const reply = await requestReply(historyWithUser, userMsg.text)
+
+          const botMsg = {
+
+            id: globalThis.crypto?.randomUUID?.() ?? `b-${now}`,
+
+            role: 'bot',
+
+            text: reply,
+
+            ts: Date.now(),
+
+          }
+
+          setMessages((m) => [...m, botMsg])
+
+        } finally {
+
+          sendingRef.current = false
+
+        }
+
+      })()
+
     }
+
     reader.readAsDataURL(file)
+
   }
+
+
+
+  const visibleMessages = messages.filter(
+
+    (m) => m.isWelcome || (m.text ?? '').trim() || m.imageSrc,
+
+  )
+
+
 
   const showIntroBubble = showIntro && !open && !isAuthPage
 
+
+
   const widget = (
     <div
-      className={`cb-root${isAuthPage ? ' cb-root--auth' : ''}`}
+      className={`cb-root${open ? ' cb-root--open' : ''}${isAuthPage ? ' cb-root--auth' : ''}`}
       id="tour-chatbot"
       aria-live="polite"
     >
       {open ? (
-        <section className="cb-panel" aria-label="workSphere chatbot">
+        <section className="cb-panel" aria-label="workSphere AI assistant">
           <header className="cb-header">
             <div className="cb-brand" aria-hidden="true">
               <img className="cb-logo" src={workSphereLogo} alt="" />
               <div className="cb-title">
                 <div className="cb-title-main">workSphere assistant</div>
-                <div className="cb-title-sub">Workflow & site help</div>
+                <div className="cb-title-sub">Project management · workSphere · ask anything</div>
               </div>
             </div>
             <div className="cb-header-actions">
-              <button className="cb-new-chat" type="button" onClick={startNewChat} aria-label="Start new chat">
+              <button
+                className="cb-new-chat"
+                type="button"
+                onClick={startNewChat}
+                disabled={loading}
+                aria-label="Start new chat"
+              >
                 New chat
               </button>
               <button className="cb-icon" type="button" onClick={() => setOpen(false)} aria-label="Close chat">
@@ -229,7 +504,8 @@ export default function ChatbotWidget() {
                 key={t.id}
                 type="button"
                 className="cb-chip"
-                onClick={() => send(t.prompts[0])}
+                disabled={loading}
+                onClick={() => void send(t.prompts[0])}
               >
                 {t.title}
               </button>
@@ -237,16 +513,26 @@ export default function ChatbotWidget() {
           </div>
 
           <div className="cb-list" ref={listRef}>
-            {messages.map((m) => (
+            {visibleMessages.map((m) => (
               <div key={m.id} className={`cb-msg ${m.role}`}>
                 <div className="cb-bubble">
                   {m.imageSrc ? (
                     <img className="cb-msg-img" src={m.imageSrc} alt="Attachment shared in chat" />
                   ) : null}
-                  {(m.text ?? '').trim() ? formatMarkdownLite(m.text) : null}
+                  {(m.text ?? '').trim() ? <ChatMessageContent text={m.text} /> : null}
                 </div>
               </div>
             ))}
+            {loading ? (
+              <div className="cb-msg bot">
+                <div className="cb-bubble cb-bubble--typing" aria-live="polite">
+                  <span className="cb-typing-dot" />
+                  <span className="cb-typing-dot" />
+                  <span className="cb-typing-dot" />
+                  <span className="cb-typing-label">Thinking…</span>
+                </div>
+              </div>
+            ) : null}
           </div>
 
           <form className="cb-form" onSubmit={onSubmit}>
@@ -262,9 +548,10 @@ export default function ChatbotWidget() {
             <button
               className="cb-attach"
               type="button"
+              disabled={loading}
               onClick={() => fileInputRef.current?.click()}
               aria-label="Upload image"
-              title="Upload image"
+              title="Upload image (AI vision)"
             >
               <span className="cb-attach-icon" aria-hidden="true">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -278,14 +565,17 @@ export default function ChatbotWidget() {
                 </svg>
               </span>
             </button>
-            <input
-              className="cb-input"
+            <textarea
+              className="cb-input cb-textarea"
               value={input}
+              rows={1}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Ask about workflow, tasks, reporting..."
+              onKeyDown={onInputKeyDown}
+              disabled={loading}
+              placeholder="Ask about project management, workSphere, or anything…"
               aria-label="Chat message"
             />
-            <button className="cb-send" type="submit">
+            <button className="cb-send" type="submit" disabled={loading || !input.trim()}>
               Send
             </button>
           </form>
@@ -309,11 +599,11 @@ export default function ChatbotWidget() {
               ×
             </button>
             <p id="cb-intro-heading" className="cb-intro-title">
-              Your chatbot assistant
+              AI assistant
             </p>
             <p className="cb-intro-text">
-              Tap this button anytime to open the <strong>workSphere assistant</strong>—ask about
-              workflows, tickets, reporting, or how to use this site.
+              Ask about <strong>project management</strong>, <strong>workSphere</strong>, or{' '}
+              <strong>anything</strong>—powered by OpenAI.
             </p>
             <div className="cb-intro-pointer" aria-hidden="true" />
           </div>
@@ -322,7 +612,7 @@ export default function ChatbotWidget() {
           className="cb-fab"
           type="button"
           onClick={toggleChat}
-          aria-label={open ? 'Close chatbot' : 'Open chatbot'}
+          aria-label={open ? 'Close assistant' : 'Open AI assistant'}
           aria-describedby={showIntroBubble ? 'cb-intro-heading' : undefined}
         >
           <img className="cb-fab-logo" src={workSphereLogo} alt="" />
@@ -333,4 +623,3 @@ export default function ChatbotWidget() {
 
   return createPortal(widget, document.body)
 }
-

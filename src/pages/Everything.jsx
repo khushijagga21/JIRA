@@ -1,65 +1,5 @@
 import { Link } from 'react-router-dom'
-
-const FEATURES = [
-  {
-    id: 'collab',
-    title: 'Team collaboration',
-    desc: 'Channels, threads, and @mentions next to your tickets—like Slack, but wired to real delivery context so decisions don’t get lost in DMs.',
-    visual: 'slack',
-    featured: true,
-    learnTo: '/#collaboration',
-  },
-  {
-    id: 'pm',
-    title: 'Project management',
-    desc: 'Boards, backlogs, priorities, and owners in one place. Plan sprints or run continuous flow—every initiative stays visible from idea to release.',
-    visual: 'pm',
-    featured: true,
-    learnTo: '/#teams',
-  },
-  {
-    id: 'templates',
-    title: 'Scrum and kanban templates',
-    desc: 'Out-of-the-box and customizable workflows to fit your team’s unique processes.',
-    icon: 'spark',
-    learnTo: '/#teams',
-  },
-  {
-    id: 'automation',
-    title: 'Automation',
-    desc: 'Cut manual updates. Build rules or start from templates so status, handoffs, and notifications stay in sync.',
-    icon: 'bolt',
-    learnTo: '/#everything',
-  },
-  {
-    id: 'insights',
-    title: 'Insights & metrics',
-    desc: 'Reports for cycle time, throughput, and delivery health—so you can spot bottlenecks early.',
-    icon: 'bars',
-    learnTo: '/#collaboration',
-  },
-  {
-    id: 'release',
-    title: 'Release & deployment management',
-    desc: 'Connect SCM and CI/CD and track work as it moves through build, staging, and production.',
-    icon: 'rocket',
-    learnTo: '/#everything',
-  },
-  {
-    id: 'deps',
-    title: 'Dependency mapping',
-    desc: 'See how work links together so blockers and upstream changes are obvious before they slip the schedule.',
-    icon: 'graph',
-    learnTo: '/#single-source',
-  },
-  {
-    id: 'filters',
-    title: 'Custom filters',
-    desc: 'Slice your backlog with powerful filters and saved views so everyone sees the right work at the right time.',
-    icon: 'filter',
-    learnTo: '/#single-source',
-  },
-]
+import { APP_FEATURES } from '../config/appFeatures.js'
 
 function SlackStylePreview() {
   return (
@@ -86,48 +26,179 @@ function SlackStylePreview() {
   )
 }
 
-function ProjectPreview() {
+function TeamsPreview() {
   return (
-    <div className="everything-preview everything-preview--pm" aria-hidden="true">
-      <div className="everything-preview-pm-col">
-        <span className="everything-preview-pm-title">To do</span>
-        <div className="everything-preview-pm-card" />
-        <div className="everything-preview-pm-card everything-preview-pm-card--sm" />
+    <div className="everything-preview everything-preview--teams" aria-hidden="true">
+      <div className="everything-preview-teams-card everything-preview-teams-card--product">
+        <span className="everything-preview-teams-avatar" />
+        <span className="everything-preview-teams-line" />
+        <span className="everything-preview-teams-line everything-preview-teams-line--short" />
       </div>
-      <div className="everything-preview-pm-col">
-        <span className="everything-preview-pm-title">Doing</span>
-        <div className="everything-preview-pm-card everything-preview-pm-card--accent" />
+      <div className="everything-preview-teams-card everything-preview-teams-card--engineering">
+        <span className="everything-preview-teams-avatar" />
+        <span className="everything-preview-teams-line" />
+        <span className="everything-preview-teams-line everything-preview-teams-line--short" />
       </div>
-      <div className="everything-preview-pm-col">
-        <span className="everything-preview-pm-title">Done</span>
-        <div className="everything-preview-pm-card everything-preview-pm-card--done" />
-        <div className="everything-preview-pm-card everything-preview-pm-card--done everything-preview-pm-card--sm" />
+      <div className="everything-preview-teams-card everything-preview-teams-card--leadership">
+        <span className="everything-preview-teams-avatar" />
+        <span className="everything-preview-teams-line" />
+        <span className="everything-preview-teams-line everything-preview-teams-line--short" />
       </div>
     </div>
   )
 }
 
-function CardIcon({ name }) {
-  const paths = {
-    spark:
-      'M12 2l2 5 5 2-5 2-2 5-2-5-5-2 5-2 2-5Zm7.2 10.2 1.3.6-.6 1.3-1.3-.6-.6-1.3 1.2 0Z',
-    bolt: 'M13 2 4 14h7l-1 8 10-14h-7l0-6Z',
-    bars: 'M5 5h3v3H5V5Zm0 6h3v8H5v-8Zm6-6h3v14h-3V5Zm6 8h3v6h-3v-6Z',
-    rocket: 'M7 4h10v2H7V4Zm-2 4h14v2H5V8Zm2 4h10v2H7v-2Zm-2 4h14v2H5v-2Z',
-    graph: 'M6 7a3 3 0 1 1 6 0c0 1.2-.7 2.3-1.7 2.8L18 17.5l-1.5 1.5-7.7-7.7A3 3 0 0 1 6 7Z',
-    filter: 'M4 6h16v2H4V6Zm0 5h10v2H4v-2Zm0 5h16v2H4v-2Z',
-  }
-  const d = paths[name] || paths.spark
+function CodingWorkspacePreview() {
   return (
-    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
-      <path fill="currentColor" d={d} />
-    </svg>
+    <div className="everything-preview everything-preview--workspace" aria-hidden="true">
+      <div className="everything-preview-ws-sidebar">
+        <span className="everything-preview-ws-dot" />
+        <span className="everything-preview-ws-dot everything-preview-ws-dot--2" />
+        <span className="everything-preview-ws-dot everything-preview-ws-dot--3" />
+      </div>
+      <div className="everything-preview-ws-editor">
+        <div className="everything-preview-ws-tab">issue/WSP-142 · workspace.tsx</div>
+        <div className="everything-preview-ws-lines">
+          <span className="everything-preview-ws-line">
+            <span className="everything-preview-ws-num">1</span>
+            <span className="everything-preview-ws-code everything-preview-ws-code--kw">export</span>
+            <span className="everything-preview-ws-code"> </span>
+            <span className="everything-preview-ws-code everything-preview-ws-code--fn">function</span>
+            <span className="everything-preview-ws-code"> fix()</span>
+            <span className="everything-preview-ws-code everything-preview-ws-code--brace">{' {'}</span>
+          </span>
+          <span className="everything-preview-ws-line">
+            <span className="everything-preview-ws-num">2</span>
+            <span className="everything-preview-ws-code"> </span>
+            <span className="everything-preview-ws-code everything-preview-ws-code--cmt">{'// linked to ticket'}</span>
+          </span>
+          <span className="everything-preview-ws-line">
+            <span className="everything-preview-ws-num">3</span>
+            <span className="everything-preview-ws-code"> </span>
+            <span className="everything-preview-ws-code everything-preview-ws-code--kw">return</span>
+            <span className="everything-preview-ws-code"> ship()</span>
+          </span>
+          <span className="everything-preview-ws-line">
+            <span className="everything-preview-ws-num">4</span>
+            <span className="everything-preview-ws-code everything-preview-ws-code--brace">{'}'}</span>
+          </span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function TodoPreview() {
+  return (
+    <div className="everything-preview everything-preview--todo" aria-hidden="true">
+      <div className="everything-preview-todo-head">
+        <span className="everything-preview-todo-title">Sprint tasks</span>
+        <span className="everything-preview-todo-count">5</span>
+      </div>
+      <ul className="everything-preview-todo-list">
+        <li className="everything-preview-todo-item everything-preview-todo-item--done">
+          <span className="everything-preview-todo-check everything-preview-todo-check--done" aria-hidden>
+            ✓
+          </span>
+          <span className="everything-preview-todo-text">Design auth flow</span>
+          <span className="everything-preview-todo-tag everything-preview-todo-tag--done">Done</span>
+        </li>
+        <li className="everything-preview-todo-item everything-preview-todo-item--doing">
+          <span className="everything-preview-todo-check everything-preview-todo-check--doing" aria-hidden />
+          <span className="everything-preview-todo-text">Build API for tasks</span>
+          <span className="everything-preview-todo-tag everything-preview-todo-tag--doing">Doing</span>
+        </li>
+        <li className="everything-preview-todo-item">
+          <span className="everything-preview-todo-check" aria-hidden />
+          <span className="everything-preview-todo-text">Wire up Kanban view</span>
+          <span className="everything-preview-todo-tag">To do</span>
+        </li>
+      </ul>
+    </div>
+  )
+}
+
+function WhiteboardPreview() {
+  return (
+    <div className="everything-preview everything-preview--whiteboard" aria-hidden="true">
+      <div className="everything-preview-wb-toolbar">
+        <span className="everything-preview-wb-pill everything-preview-wb-pill--on" />
+        <span className="everything-preview-wb-pill" />
+        <span className="everything-preview-wb-swatch" />
+      </div>
+      <div className="everything-preview-wb-canvas">
+        <svg className="everything-preview-wb-strokes" viewBox="0 0 200 80" preserveAspectRatio="none">
+          <path
+            d="M12 52 Q48 18 88 42 T168 28"
+            fill="none"
+            stroke="#0c66e4"
+            strokeWidth="3"
+            strokeLinecap="round"
+          />
+          <rect x="118" y="48" width="52" height="22" rx="6" fill="none" stroke="#f59e0b" strokeWidth="2.5" />
+          <circle cx="42" cy="62" r="8" fill="none" stroke="#22c55e" strokeWidth="2.5" />
+        </svg>
+      </div>
+    </div>
+  )
+}
+
+const PREVIEWS = {
+  slack: SlackStylePreview,
+  teams: TeamsPreview,
+  whiteboard: WhiteboardPreview,
+  todo: TodoPreview,
+  workspace: CodingWorkspacePreview,
+}
+
+function FeatureCard({ feature }) {
+  const Preview = PREVIEWS[feature.cardTone]
+  const cardClass = `everything-card everything-card--featured everything-card--${feature.cardTone}`
+
+  const body = (
+    <>
+      <Preview />
+      {feature.comingSoon ? (
+        <div className="everything-card-head everything-card-head--featured">
+          <h3 className="everything-card-title">{feature.title}</h3>
+          <span className="everything-badge">Coming soon</span>
+        </div>
+      ) : (
+        <h3 className="everything-card-title">{feature.title}</h3>
+      )}
+      <p className="everything-card-desc">{feature.desc}</p>
+      {!feature.comingSoon ? (
+        <span className="everything-card-cta">Open {feature.navLabel} →</span>
+      ) : null}
+    </>
+  )
+
+  if (feature.comingSoon) {
+    return (
+      <article
+        id={feature.anchor}
+        className={`${cardClass} everything-card--soon`}
+        aria-label={`${feature.title} — coming soon`}
+      >
+        {body}
+      </article>
+    )
+  }
+
+  return (
+    <Link
+      to={feature.to}
+      id={feature.anchor}
+      className={`${cardClass} everything-card--clickable`}
+      aria-label={`Open ${feature.title}`}
+    >
+      {body}
+    </Link>
   )
 }
 
 export default function Everything({ variant = 'embed' }) {
   const isPage = variant === 'page'
-  const [first, second, ...rest] = FEATURES
 
   return (
     <section
@@ -137,50 +208,20 @@ export default function Everything({ variant = 'embed' }) {
     >
       <div className={isPage ? undefined : 'container'}>
         <h2 className="everything-title" id={isPage ? 'everything-page-title' : undefined}>
-          {isPage ? 'All features' : 'Everything your engineering team needs'}
+          {isPage ? 'All features' : 'Everything your team needs to collaborate'}
         </h2>
         {isPage ? (
           <p className="everything-lead">
-            Explore what workSphere offers—from Slack-style collaboration beside your work to full project
-            management on boards and backlogs.
+            Explore what workSphere offers—from Slack-style chat and role-based teams to a shared whiteboard,
+            plus a coding workspace for focused build context. Click a card to try it.
           </p>
         ) : null}
 
         <div className="everything-featured-row">
-          <article className="everything-card everything-card--featured everything-card--slack">
-            <SlackStylePreview />
-            <h3 className="everything-card-title">{first.title}</h3>
-            <p className="everything-card-desc">{first.desc}</p>
-            <Link className="everything-link" to={first.learnTo}>
-              Learn more <span aria-hidden="true">→</span>
-            </Link>
-          </article>
-          <article className="everything-card everything-card--featured everything-card--pm">
-            <ProjectPreview />
-            <h3 className="everything-card-title">{second.title}</h3>
-            <p className="everything-card-desc">{second.desc}</p>
-            <Link className="everything-link" to={second.learnTo}>
-              Learn more <span aria-hidden="true">→</span>
-            </Link>
-          </article>
+          {APP_FEATURES.map((feature) => (
+            <FeatureCard key={feature.id} feature={feature} />
+          ))}
         </div>
-
-        {isPage ? null : (
-          <div className="everything-grid everything-grid--rest">
-            {rest.map((f) => (
-              <article className="everything-card" key={f.id}>
-                <div className="everything-icon" aria-hidden="true">
-                  <CardIcon name={f.icon} />
-                </div>
-                <h3 className="everything-card-title">{f.title}</h3>
-                <p className="everything-card-desc">{f.desc}</p>
-                <Link className="everything-link" to={f.learnTo}>
-                  Learn more <span aria-hidden="true">→</span>
-                </Link>
-              </article>
-            ))}
-          </div>
-        )}
       </div>
     </section>
   )

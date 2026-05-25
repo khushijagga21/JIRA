@@ -1,20 +1,59 @@
 import 'dotenv/config'
+import { createRequire } from 'node:module'
 import express from 'express'
 import cors from 'cors'
 import bcrypt from 'bcryptjs'
-import Database from 'better-sqlite3'
 import crypto from 'crypto'
 import fs from 'fs'
 import multer from 'multer'
 import nodemailer from 'nodemailer'
+import os from 'node:os'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import { handleAssistantChat } from './assistant.js'
+import { attachMeetSignaling } from './meet-signaling.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
+const require = createRequire(import.meta.url)
 
-const dbPath = path.join(__dirname, 'worksphere.db')
-const db = new Database(dbPath)
+function patchSqliteCompat(conn) {
+  if (typeof conn.pragma !== 'function') {
+    conn.pragma = (setting) => {
+      conn.exec(`PRAGMA ${setting}`)
+    }
+  }
+  if (typeof conn.transaction !== 'function') {
+    conn.transaction = (fn) => () => fn()
+  }
+  return conn
+}
+
+function openDatabase(dbPath) {
+  try {
+    const BetterSqlite3 = require('better-sqlite3')
+    const conn = new BetterSqlite3(dbPath)
+    console.log('[workSphere] Database: better-sqlite3')
+    return patchSqliteCompat(conn)
+  } catch (err) {
+    const msg = String(err?.message ?? err)
+    const nativeMismatch =
+      err?.code === 'ERR_DLOPEN_FAILED' || msg.includes('NODE_MODULE_VERSION')
+    if (!nativeMismatch) throw err
+    console.warn(
+      '[workSphere] better-sqlite3 could not load for this Node version; using built-in node:sqlite.',
+    )
+    const { DatabaseSync } = require('node:sqlite')
+    return patchSqliteCompat(new DatabaseSync(dbPath))
+  }
+}
+
+const dataDir = process.env.WORKSPHERE_DATA_DIR
+  ? path.resolve(process.env.WORKSPHERE_DATA_DIR)
+  : __dirname
+fs.mkdirSync(dataDir, { recursive: true })
+const dbPath = path.join(dataDir, 'worksphere.db')
+const db = openDatabase(dbPath)
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -115,11 +154,56 @@ function ensureCollabMessageAttachments() {
 }
 ensureCollabMessageAttachments()
 
-const COLLAB_MAX_MEMBERS = 200
+function ensureCollabMessageEditDelete() {
+  const cols = db.prepare('PRAGMA table_info(collab_messages)').all()
+  const names = new Set(cols.map((c) => c.name))
+  if (!names.has('updated_at')) {
+    db.exec('ALTER TABLE collab_messages ADD COLUMN updated_at INTEGER')
+  }
+  if (!names.has('deleted_at')) {
+    db.exec('ALTER TABLE collab_messages ADD COLUMN deleted_at INTEGER')
+  }
+}
+ensureCollabMessageEditDelete()
+
+const COLLAB_MEMBER_LIMIT_CAP = 200
+const COLLAB_MEMBER_LIMIT_MIN = 2
+const COLLAB_MEMBER_LIMIT_DEFAULT = 200
+const MESSAGE_EDIT_WINDOW_MS = 2 * 60 * 1000
+
+function ensureCollabRoomMemberLimitColumn() {
+  const cols = db.prepare('PRAGMA table_info(collab_rooms)').all()
+  if (!cols.some((c) => c.name === 'member_limit')) {
+    db.exec('ALTER TABLE collab_rooms ADD COLUMN member_limit INTEGER')
+  }
+  db.prepare('UPDATE collab_rooms SET member_limit = ? WHERE member_limit IS NULL').run(COLLAB_MEMBER_LIMIT_DEFAULT)
+}
+ensureCollabRoomMemberLimitColumn()
 
 function collabMemberCount(roomId) {
   const row = db.prepare('SELECT COUNT(*) AS c FROM collab_members WHERE room_id = ?').get(roomId)
   return Number(row?.c ?? 0)
+}
+
+function collabRoomMemberLimit(roomId) {
+  const row = db.prepare('SELECT member_limit AS lim FROM collab_rooms WHERE id = ?').get(roomId)
+  let lim = Number(row?.lim)
+  if (!Number.isFinite(lim)) lim = COLLAB_MEMBER_LIMIT_DEFAULT
+  lim = Math.floor(lim)
+  if (lim < COLLAB_MEMBER_LIMIT_MIN) lim = COLLAB_MEMBER_LIMIT_MIN
+  if (lim > COLLAB_MEMBER_LIMIT_CAP) lim = COLLAB_MEMBER_LIMIT_CAP
+  return lim
+}
+
+function collabRoomIsFull(roomId) {
+  return collabMemberCount(roomId) >= collabRoomMemberLimit(roomId)
+}
+
+function parseRequestedMemberLimit(raw) {
+  let n = Number(raw)
+  if (!Number.isFinite(n)) n = COLLAB_MEMBER_LIMIT_DEFAULT
+  n = Math.floor(n)
+  return Math.min(COLLAB_MEMBER_LIMIT_CAP, Math.max(COLLAB_MEMBER_LIMIT_MIN, n))
 }
 
 function normalizeEmail(email) {
@@ -142,14 +226,42 @@ const app = express()
 app.use(cors())
 app.use(express.json())
 
-const uploadsCollabDir = path.join(__dirname, 'uploads', 'collab')
+const uploadsCollabDir = path.join(dataDir, 'uploads', 'collab')
 fs.mkdirSync(uploadsCollabDir, { recursive: true })
 
-const APP_PUBLIC_URL = (
-  process.env.PUBLIC_APP_URL ||
-  process.env.VITE_PUBLIC_APP_URL ||
-  'http://localhost:5173'
-).replace(/\/$/, '')
+function getExplicitPublicAppUrl() {
+  const raw =
+    process.env.PUBLIC_APP_URL ||
+    process.env.WORKSPHERE_PUBLIC_URL ||
+    process.env.VITE_PUBLIC_APP_URL ||
+    process.env.VITE_WORKSPHERE_PUBLIC_URL
+  return typeof raw === 'string' && raw.trim() ? raw.trim().replace(/\/$/, '') : ''
+}
+
+function getLanIPv4() {
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const n of list || []) {
+      if (n.family === 'IPv4' && !n.internal) return n.address
+    }
+  }
+  return ''
+}
+
+function getDevClientPort() {
+  const p = process.env.VITE_DEV_SERVER_PORT || process.env.VITE_PORT || '5173'
+  const n = Number.parseInt(String(p), 10)
+  return Number.isFinite(n) && n > 0 ? String(n) : '5173'
+}
+
+function resolvePublicAppUrlForServer() {
+  const ex = getExplicitPublicAppUrl()
+  if (ex) return ex
+  const ip = getLanIPv4()
+  if (ip) return `http://${ip}:${getDevClientPort()}`
+  return 'http://localhost:5173'
+}
+
+const APP_PUBLIC_URL = resolvePublicAppUrlForServer()
 const MAIL_FROM = process.env.SMTP_FROM || 'workSphere <noreply@worksphere.local>'
 
 function createMailer() {
@@ -213,6 +325,23 @@ const uploadCollab = multer({
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true })
+})
+
+app.post('/api/assistant/chat', express.json({ limit: '6mb' }), handleAssistantChat)
+
+/** Used by the web app to build join/meet links that work on phones (LAN) or production domain. */
+app.get('/api/public-invite-origin', (_req, res) => {
+  const ex = getExplicitPublicAppUrl()
+  if (ex) {
+    res.json({ origin: ex, source: 'configured' })
+    return
+  }
+  const ip = getLanIPv4()
+  if (ip) {
+    res.json({ origin: `http://${ip}:${getDevClientPort()}`, source: 'lan' })
+    return
+  }
+  res.json({ origin: 'http://localhost:5173', source: 'localhost' })
 })
 
 app.post('/api/signup', (req, res) => {
@@ -332,13 +461,15 @@ app.get('/api/collab/email-invite/:token', (req, res) => {
     return
   }
   const count = collabMemberCount(row.room_id)
+  const cap = collabRoomMemberLimit(row.room_id)
   res.json({
     ok: true,
     roomName: row.room_name,
     inviteeEmail: row.invitee_email,
     inviterName: row.inviter_name,
     status: row.status,
-    roomFull: count >= COLLAB_MAX_MEMBERS,
+    roomFull: count >= cap,
+    memberLimit: cap,
     roomId: row.room_id,
   })
 })
@@ -359,8 +490,8 @@ app.post('/api/collab/email-invite/:token/accept', (req, res) => {
     res.status(400).json({ ok: false, reason: 'invite_closed' })
     return
   }
-  if (collabMemberCount(row.room_id) >= COLLAB_MAX_MEMBERS) {
-    res.status(403).json({ ok: false, reason: 'room_full' })
+  if (collabRoomIsFull(row.room_id)) {
+    res.status(403).json({ ok: false, reason: 'room_full', memberLimit: collabRoomMemberLimit(row.room_id) })
     return
   }
   const email = normalizeEmail(row.invitee_email)
@@ -407,8 +538,8 @@ app.post('/api/collab/rooms/:roomId/email-invite', async (req, res) => {
     res.status(403).json({ ok: false, reason: 'not_a_member' })
     return
   }
-  if (collabMemberCount(roomId) >= COLLAB_MAX_MEMBERS) {
-    res.status(403).json({ ok: false, reason: 'room_full' })
+  if (collabRoomIsFull(roomId)) {
+    res.status(403).json({ ok: false, reason: 'room_full', memberLimit: collabRoomMemberLimit(roomId) })
     return
   }
   const alreadyMember = db
@@ -508,13 +639,13 @@ app.post('/api/collab/rooms/:roomId/upload', uploadCollabSafe, (req, res) => {
     res.status(403).json({ ok: false, reason: 'not_a_member' })
     return
   }
-  if (collabMemberCount(roomId) >= COLLAB_MAX_MEMBERS) {
+  if (collabRoomIsFull(roomId)) {
     try {
       fs.unlinkSync(req.file.path)
     } catch {
       // ignore
     }
-    res.status(403).json({ ok: false, reason: 'room_full' })
+    res.status(403).json({ ok: false, reason: 'room_full', memberLimit: collabRoomMemberLimit(roomId) })
     return
   }
   const caption = String(req.body?.caption ?? '').trim().slice(0, 8000)
@@ -571,9 +702,14 @@ app.get('/api/collab/rooms/:roomId/messages/:messageId/file', (req, res) => {
   }
   const msg = db
     .prepare(
-      'SELECT attachment_stored, attachment_original, attachment_mime FROM collab_messages WHERE id = ? AND room_id = ?',
+      `SELECT attachment_stored, attachment_original, attachment_mime, deleted_at
+       FROM collab_messages WHERE id = ? AND room_id = ?`,
     )
     .get(messageId, roomId)
+  if (msg?.deleted_at) {
+    res.status(404).end()
+    return
+  }
   if (!msg?.attachment_stored) {
     res.status(404).end()
     return
@@ -606,7 +742,7 @@ app.get('/api/collab/rooms/mine', (req, res) => {
   }
   const rows = db
     .prepare(
-      `SELECT r.id, r.name, r.created_at,
+      `SELECT r.id, r.name, r.created_at, r.member_limit,
         (SELECT COUNT(*) FROM collab_members m WHERE m.room_id = r.id) AS member_count
        FROM collab_rooms r
        INNER JOIN collab_members mem ON mem.room_id = r.id AND mem.email = ?
@@ -635,12 +771,14 @@ app.get('/api/collab/invite/:token', (req, res) => {
     return
   }
   const count = collabMemberCount(room.id)
+  const cap = collabRoomMemberLimit(room.id)
   res.json({
     ok: true,
     roomId: room.id,
     name: room.name,
     memberCount: count,
-    full: count >= COLLAB_MAX_MEMBERS,
+    memberLimit: cap,
+    full: count >= cap,
   })
 })
 
@@ -657,8 +795,8 @@ app.post('/api/collab/join', (req, res) => {
     res.status(404).json({ ok: false, reason: 'invalid_invite' })
     return
   }
-  if (collabMemberCount(room.id) >= COLLAB_MAX_MEMBERS) {
-    res.status(403).json({ ok: false, reason: 'room_full' })
+  if (collabRoomIsFull(room.id)) {
+    res.status(403).json({ ok: false, reason: 'room_full', memberLimit: collabRoomMemberLimit(room.id) })
     return
   }
   const now = Date.now()
@@ -672,6 +810,7 @@ app.post('/api/collab/rooms', (req, res) => {
   const name = String(req.body?.name ?? '').trim().slice(0, 80)
   const creatorEmail = String(req.body?.creatorEmail ?? '').trim().toLowerCase().slice(0, 120)
   const creatorName = String(req.body?.creatorName ?? '').trim().slice(0, 80)
+  const memberLimit = parseRequestedMemberLimit(req.body?.memberLimit)
   if (!name || !creatorEmail || !creatorName) {
     res.status(400).json({ ok: false, reason: 'missing_fields' })
     return
@@ -679,13 +818,13 @@ app.post('/api/collab/rooms', (req, res) => {
   const now = Date.now()
   const inviteToken = crypto.randomUUID()
   const insertRoom = db.prepare(
-    'INSERT INTO collab_rooms (name, created_at, invite_token) VALUES (?, ?, ?)',
+    'INSERT INTO collab_rooms (name, created_at, invite_token, member_limit) VALUES (?, ?, ?, ?)',
   )
   const insertMember = db.prepare(
     'INSERT OR IGNORE INTO collab_members (room_id, email, name, joined_at) VALUES (?, ?, ?, ?)',
   )
   const tx = db.transaction(() => {
-    const info = insertRoom.run(name, now, inviteToken)
+    const info = insertRoom.run(name, now, inviteToken, memberLimit)
     const roomId = Number(info.lastInsertRowid)
     insertMember.run(roomId, creatorEmail, creatorName, now)
     return roomId
@@ -694,7 +833,7 @@ app.post('/api/collab/rooms', (req, res) => {
     const roomId = tx()
     res.json({
       ok: true,
-      room: { id: roomId, name, created_at: now, invite_token: inviteToken },
+      room: { id: roomId, name, created_at: now, invite_token: inviteToken, member_limit: memberLimit },
     })
   } catch {
     res.status(500).json({ ok: false, reason: 'server_error' })
@@ -720,7 +859,7 @@ app.get('/api/collab/rooms/:roomId', (req, res) => {
     return
   }
   const room = db
-    .prepare('SELECT id, name, created_at, invite_token FROM collab_rooms WHERE id = ?')
+    .prepare('SELECT id, name, created_at, invite_token, member_limit FROM collab_rooms WHERE id = ?')
     .get(roomId)
   if (!room) {
     res.status(404).json({ ok: false, reason: 'not_found' })
@@ -733,13 +872,127 @@ app.get('/api/collab/rooms/:roomId', (req, res) => {
     .all(roomId)
   const messages = db
     .prepare(
-      `SELECT id, author_email, author_name, body, created_at,
+      `SELECT id, author_email, author_name, body, created_at, updated_at, deleted_at,
         attachment_stored, attachment_original, attachment_mime
        FROM collab_messages WHERE room_id = ?
        ORDER BY created_at ASC LIMIT 300`,
     )
     .all(roomId)
   res.json({ ok: true, room, members, messages })
+})
+
+function collabAssertMember(roomId, email) {
+  return db.prepare('SELECT 1 AS x FROM collab_members WHERE room_id = ? AND email = ?').get(roomId, email)
+}
+
+function collabGetMessage(roomId, messageId) {
+  return db
+    .prepare(
+      `SELECT id, room_id, author_email, author_name, body, created_at, updated_at, deleted_at,
+        attachment_stored, attachment_original, attachment_mime
+       FROM collab_messages WHERE id = ? AND room_id = ?`,
+    )
+    .get(messageId, roomId)
+}
+
+function collabRemoveAttachmentFile(storedName) {
+  if (!storedName) return
+  try {
+    fs.unlinkSync(path.join(uploadsCollabDir, storedName))
+  } catch {
+    // ignore
+  }
+}
+
+app.patch('/api/collab/rooms/:roomId/messages/:messageId', (req, res) => {
+  const roomId = collabRoomIdParam(req)
+  const messageId = collabMessageIdParam(req)
+  if (!roomId || !messageId) {
+    res.status(400).json({ ok: false, reason: 'bad_id' })
+    return
+  }
+  const authorEmail = normalizeEmail(req.body?.authorEmail)
+  const body = String(req.body?.body ?? '').trim().slice(0, 8000)
+  if (!authorEmail || !body) {
+    res.status(400).json({ ok: false, reason: 'missing_fields' })
+    return
+  }
+  if (!collabAssertMember(roomId, authorEmail)) {
+    res.status(403).json({ ok: false, reason: 'not_a_member' })
+    return
+  }
+  const row = collabGetMessage(roomId, messageId)
+  if (!row) {
+    res.status(404).json({ ok: false, reason: 'not_found' })
+    return
+  }
+  if (normalizeEmail(row.author_email) !== authorEmail) {
+    res.status(403).json({ ok: false, reason: 'not_author' })
+    return
+  }
+  if (row.deleted_at) {
+    res.status(400).json({ ok: false, reason: 'message_deleted' })
+    return
+  }
+  const age = Date.now() - Number(row.created_at)
+  if (age > MESSAGE_EDIT_WINDOW_MS) {
+    res.status(403).json({ ok: false, reason: 'edit_window_expired' })
+    return
+  }
+  const now = Date.now()
+  db.prepare('UPDATE collab_messages SET body = ?, updated_at = ? WHERE id = ? AND room_id = ?').run(
+    body,
+    now,
+    messageId,
+    roomId,
+  )
+  res.json({
+    ok: true,
+    message: {
+      id: messageId,
+      body,
+      updated_at: now,
+    },
+  })
+})
+
+app.delete('/api/collab/rooms/:roomId/messages/:messageId', (req, res) => {
+  const roomId = collabRoomIdParam(req)
+  const messageId = collabMessageIdParam(req)
+  if (!roomId || !messageId) {
+    res.status(400).json({ ok: false, reason: 'bad_id' })
+    return
+  }
+  const authorEmail = normalizeEmail(req.body?.authorEmail)
+  if (!authorEmail) {
+    res.status(400).json({ ok: false, reason: 'missing_fields' })
+    return
+  }
+  if (!collabAssertMember(roomId, authorEmail)) {
+    res.status(403).json({ ok: false, reason: 'not_a_member' })
+    return
+  }
+  const row = collabGetMessage(roomId, messageId)
+  if (!row) {
+    res.status(404).json({ ok: false, reason: 'not_found' })
+    return
+  }
+  if (normalizeEmail(row.author_email) !== authorEmail) {
+    res.status(403).json({ ok: false, reason: 'not_author' })
+    return
+  }
+  if (row.deleted_at) {
+    res.json({ ok: true })
+    return
+  }
+  const now = Date.now()
+  collabRemoveAttachmentFile(row.attachment_stored)
+  db.prepare(
+    `UPDATE collab_messages SET body = '', deleted_at = ?, updated_at = NULL,
+      attachment_stored = NULL, attachment_original = NULL, attachment_mime = NULL
+     WHERE id = ? AND room_id = ?`,
+  ).run(now, messageId, roomId)
+  res.json({ ok: true, deleted_at: now })
 })
 
 app.post('/api/collab/rooms/:roomId/members', (req, res) => {
@@ -762,8 +1015,8 @@ app.post('/api/collab/rooms/:roomId/members', (req, res) => {
   const already = db
     .prepare('SELECT 1 AS x FROM collab_members WHERE room_id = ? AND email = ?')
     .get(roomId, email)
-  if (!already && collabMemberCount(roomId) >= COLLAB_MAX_MEMBERS) {
-    res.status(403).json({ ok: false, reason: 'room_full' })
+  if (!already && collabRoomIsFull(roomId)) {
+    res.status(403).json({ ok: false, reason: 'room_full', memberLimit: collabRoomMemberLimit(roomId) })
     return
   }
   const now = Date.now()
@@ -818,8 +1071,26 @@ app.post('/api/collab/rooms/:roomId/messages', (req, res) => {
 
 const port = Number(process.env.PORT ?? 8787)
 const listenHost = process.env.API_LISTEN_HOST || '0.0.0.0'
-app.listen(port, listenHost, () => {
+const server = app.listen(port, listenHost, () => {
+  const lan = getLanIPv4()
+  const webPort = getDevClientPort()
   console.log(
-    `[workSphere] API on port ${port} (reachable on your LAN for phone testing). Vite proxies /api from the dev server.`,
+    `[workSphere] API on port ${port} (AI assistant + collab API). Vite proxies /api from the dev server.`,
   )
+  if (lan) {
+    console.log(`[workSphere] Phone invite links use: http://${lan}:${webPort}/join/<token>`)
+    console.log(`[workSphere] Meet links (LAN): http://${lan}:${webPort}/teams/meet?room=<code>`)
+  }
+})
+attachMeetSignaling(server)
+server.on('error', (err) => {
+  if (err?.code === 'EADDRINUSE') {
+    console.error(
+      `[workSphere] Port ${port} is already in use (often an old API still running).`,
+      'Stop other terminals running npm run dev, or run: npm run dev:restart',
+    )
+    process.exit(1)
+  }
+  console.error('[workSphere] API server error:', err)
+  process.exit(1)
 })

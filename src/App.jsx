@@ -18,26 +18,370 @@ import {
 } from './utils/auth.js'
 import { getTheme, setTheme, THEME_STORAGE_KEY } from './utils/theme.js'
 import ChatbotWidget from './components/ChatbotWidget.jsx'
+import HomeHero from './components/HomeHero.jsx'
+import HomeIntro from './components/HomeIntro.jsx'
+import HomeCollab from './components/HomeCollab.jsx'
 import ProductTour from './components/ProductTour.jsx'
 import SlackCollaboration from './components/SlackCollaboration.jsx'
-
-const NAV_FEATURES = [
-  { label: 'All features', to: '/features' },
-  { label: 'Boards & backlogs', to: '/#teams' },
-  { label: 'Planning & priorities', to: '/#single-source' },
-]
-
-const NAV_SOLUTIONS = [
-  { label: 'Engineering teams', to: '/#teams' },
-  { label: 'Product & design', to: '/#collaboration' },
-  { label: 'Growing teams', to: '/#single-source' },
-]
+import TeamsMeet from './components/TeamsMeet.jsx'
+import Todo from './pages/Todo.jsx'
+import { buildNavFeatures } from './config/appFeatures.js'
+import {
+  loadGallery as loadWhiteboardGallery,
+  saveDrawing as saveWhiteboardDrawing,
+  deleteDrawing as deleteWhiteboardDrawing,
+  renameDrawing as renameWhiteboardDrawing,
+  queueChatShare as queueWhiteboardChatShare,
+} from './utils/whiteboardStore.js'
 
 const NAV_MORE = [
   { label: 'Help center', href: '#' },
   { label: "What's new", href: '#' },
   { label: 'API & integrations', to: '/features' },
+  { label: 'workSphere Whiteboard', to: '/whiteboard' },
 ]
+
+const NAV_TEAMS = [
+  { label: 'Teams overview', to: '/#teams' },
+  { label: 'Meet', to: '/teams/meet' },
+]
+
+function clamp(n, a, b) {
+  return Math.max(a, Math.min(b, n))
+}
+
+function Whiteboard({ onOpenSlack }) {
+  const canvasRef = useRef(null)
+  const ctxRef = useRef(null)
+  const [tool, setTool] = useState('pen') // pen | eraser
+  const [color, setColor] = useState('#0c66e4')
+  const [size, setSize] = useState(6)
+  const downRef = useRef(false)
+  const lastRef = useRef({ x: 0, y: 0 })
+  const [gallery, setGallery] = useState(() => loadWhiteboardGallery())
+  const [galleryOpen, setGalleryOpen] = useState(false)
+  const [savedToast, setSavedToast] = useState('')
+  const [hasStrokes, setHasStrokes] = useState(false)
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    ctxRef.current = ctx
+
+    function resize() {
+      const rect = canvas.getBoundingClientRect()
+      const dpr = window.devicePixelRatio || 1
+      const nextW = Math.max(1, Math.floor(rect.width * dpr))
+      const nextH = Math.max(1, Math.floor(rect.height * dpr))
+      if (canvas.width !== nextW || canvas.height !== nextH) {
+        canvas.width = nextW
+        canvas.height = nextH
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      }
+    }
+
+    resize()
+    window.addEventListener('resize', resize)
+    return () => window.removeEventListener('resize', resize)
+  }, [])
+
+  function point(e) {
+    const canvas = canvasRef.current
+    if (!canvas) return { x: 0, y: 0 }
+    const rect = canvas.getBoundingClientRect()
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top }
+  }
+
+  function clear() {
+    const canvas = canvasRef.current
+    const ctx = ctxRef.current
+    if (!canvas || !ctx) return
+    ctx.save()
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    ctx.restore()
+    setHasStrokes(false)
+  }
+
+  function showSavedHint(text) {
+    setSavedToast(text)
+    window.setTimeout(() => setSavedToast(''), 2400)
+  }
+
+  function exportDataUrl() {
+    const canvas = canvasRef.current
+    if (!canvas) return null
+    const out = document.createElement('canvas')
+    out.width = canvas.width
+    out.height = canvas.height
+    const octx = out.getContext('2d')
+    if (!octx) return null
+    octx.fillStyle = '#ffffff'
+    octx.fillRect(0, 0, out.width, out.height)
+    octx.drawImage(canvas, 0, 0)
+    return out.toDataURL('image/png')
+  }
+
+  function downloadDataUrl(dataUrl, name) {
+    if (!dataUrl) return
+    const a = document.createElement('a')
+    a.href = dataUrl
+    const safe = (name || 'worksphere-drawing').replace(/[^a-z0-9-_]+/gi, '-').slice(0, 60)
+    a.download = `${safe || 'worksphere-drawing'}.png`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  }
+
+  function saveCurrent({ silent } = {}) {
+    if (!hasStrokes) {
+      if (!silent) showSavedHint('Draw something first to save it.')
+      return null
+    }
+    const defaultName = `Drawing ${new Date().toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`
+    const name = silent ? defaultName : window.prompt('Name this drawing', defaultName) || defaultName
+    const dataUrl = exportDataUrl()
+    if (!dataUrl) return null
+    const item = saveWhiteboardDrawing({ name, dataUrl })
+    setGallery(loadWhiteboardGallery())
+    if (!silent) {
+      downloadDataUrl(dataUrl, name)
+      showSavedHint('Drawing saved.')
+    }
+    return item
+  }
+
+  function sendCurrentToChat() {
+    if (!hasStrokes) {
+      showSavedHint('Draw something first to send.')
+      return
+    }
+    const item = saveCurrent({ silent: true })
+    if (!item) return
+    queueWhiteboardChatShare({ name: item.name, dataUrl: item.dataUrl })
+    showSavedHint('Pick a chat to send your drawing.')
+    onOpenSlack?.()
+  }
+
+  function sendGalleryItemToChat(item) {
+    queueWhiteboardChatShare({ name: item.name, dataUrl: item.dataUrl })
+    showSavedHint('Pick a chat to send your drawing.')
+    onOpenSlack?.()
+  }
+
+  function removeGalleryItem(id) {
+    deleteWhiteboardDrawing(id)
+    setGallery(loadWhiteboardGallery())
+  }
+
+  function renameGalleryItem(item) {
+    const next = window.prompt('Rename drawing', item.name)
+    if (next == null) return
+    renameWhiteboardDrawing(item.id, next)
+    setGallery(loadWhiteboardGallery())
+  }
+
+  return (
+    <main className="wb">
+      <header className="wb-top">
+        <div className="wb-title">workSphere Whiteboard</div>
+        <div className="wb-tools" role="toolbar" aria-label="Whiteboard tools">
+          <button
+            type="button"
+            className={`wb-btn ${tool === 'pen' ? 'is-on' : ''}`}
+            onClick={() => setTool('pen')}
+          >
+            Pen
+          </button>
+          <button
+            type="button"
+            className={`wb-btn ${tool === 'eraser' ? 'is-on' : ''}`}
+            onClick={() => setTool('eraser')}
+          >
+            Eraser
+          </button>
+          <label className="wb-field" aria-label="Color">
+            <span className="wb-field-label">Color</span>
+            <input
+              type="color"
+              value={color}
+              onChange={(e) => setColor(e.target.value)}
+              disabled={tool === 'eraser'}
+            />
+          </label>
+          <label className="wb-field" aria-label="Brush size">
+            <span className="wb-field-label">Size</span>
+            <input
+              type="range"
+              min="1"
+              max="32"
+              value={size}
+              onChange={(e) => setSize(Number(e.target.value))}
+            />
+          </label>
+          <span className="wb-toolbar-sep" aria-hidden />
+          <button
+            type="button"
+            className="wb-btn wb-btn-primary"
+            onClick={() => saveCurrent()}
+            title="Save this drawing and download a PNG"
+          >
+            💾 Save
+          </button>
+          <button
+            type="button"
+            className="wb-btn wb-btn-accent"
+            onClick={sendCurrentToChat}
+            title="Send this drawing into a workSphere chat"
+          >
+            ✈ Send to chat
+          </button>
+          <button
+            type="button"
+            className={`wb-btn ${galleryOpen ? 'is-on' : ''}`}
+            onClick={() => setGalleryOpen((v) => !v)}
+            title="Open saved drawings"
+          >
+            📁 Saved
+            {gallery.length > 0 ? <span className="wb-pill">{gallery.length}</span> : null}
+          </button>
+          <button type="button" className="wb-btn wb-btn-danger" onClick={clear}>
+            Clear
+          </button>
+        </div>
+      </header>
+
+      <div className="wb-stage">
+        <canvas
+          ref={canvasRef}
+          className="wb-canvas"
+          onPointerDown={(e) => {
+            const ctx = ctxRef.current
+            if (!ctx) return
+            downRef.current = true
+            const p = point(e)
+            lastRef.current = p
+            ctx.lineCap = 'round'
+            ctx.lineJoin = 'round'
+            ctx.lineWidth = clamp(size, 1, 48)
+            if (tool === 'eraser') {
+              ctx.globalCompositeOperation = 'destination-out'
+              ctx.strokeStyle = 'rgba(0,0,0,1)'
+            } else {
+              ctx.globalCompositeOperation = 'source-over'
+              ctx.strokeStyle = color
+            }
+            ctx.beginPath()
+            ctx.moveTo(p.x, p.y)
+            setHasStrokes(true)
+          }}
+          onPointerMove={(e) => {
+            const ctx = ctxRef.current
+            if (!ctx || !downRef.current) return
+            const p = point(e)
+            const last = lastRef.current
+            lastRef.current = p
+            ctx.quadraticCurveTo(last.x, last.y, (last.x + p.x) / 2, (last.y + p.y) / 2)
+            ctx.stroke()
+          }}
+          onPointerUp={() => {
+            const ctx = ctxRef.current
+            if (!ctx) return
+            downRef.current = false
+            ctx.closePath()
+          }}
+          onPointerLeave={() => {
+            const ctx = ctxRef.current
+            if (!ctx) return
+            downRef.current = false
+            ctx.closePath()
+          }}
+        />
+
+        {savedToast ? <div className="wb-toast" role="status">{savedToast}</div> : null}
+      </div>
+
+      {galleryOpen ? (
+        <aside className="wb-gallery" aria-label="Saved drawings">
+          <div className="wb-gallery-head">
+            <div>
+              <h2 className="wb-gallery-title">Saved drawings</h2>
+              <p className="wb-gallery-sub">Stored locally in your browser. Send any one straight into a chat.</p>
+            </div>
+            <button
+              type="button"
+              className="wb-gallery-close"
+              onClick={() => setGalleryOpen(false)}
+              aria-label="Close saved drawings"
+            >
+              ×
+            </button>
+          </div>
+          {gallery.length === 0 ? (
+            <p className="wb-gallery-empty">
+              No drawings saved yet. Sketch something, then hit <strong>💾 Save</strong>.
+            </p>
+          ) : (
+            <ul className="wb-gallery-grid">
+              {gallery.map((item) => (
+                <li key={item.id} className="wb-gallery-card">
+                  <div className="wb-gallery-thumb">
+                    <img src={item.dataUrl} alt={item.name} />
+                  </div>
+                  <div className="wb-gallery-meta">
+                    <button
+                      type="button"
+                      className="wb-gallery-name"
+                      onClick={() => renameGalleryItem(item)}
+                      title="Click to rename"
+                    >
+                      {item.name}
+                    </button>
+                    <span className="wb-gallery-date">
+                      {new Date(item.createdAt).toLocaleString(undefined, {
+                        month: 'short',
+                        day: 'numeric',
+                        hour: 'numeric',
+                        minute: '2-digit',
+                      })}
+                    </span>
+                  </div>
+                  <div className="wb-gallery-actions">
+                    <button
+                      type="button"
+                      className="wb-gallery-action"
+                      onClick={() => sendGalleryItemToChat(item)}
+                      title="Send into a workSphere chat"
+                    >
+                      ✈ Send
+                    </button>
+                    <button
+                      type="button"
+                      className="wb-gallery-action"
+                      onClick={() => downloadDataUrl(item.dataUrl, item.name)}
+                      title="Download PNG"
+                    >
+                      ⤓ Save
+                    </button>
+                    <button
+                      type="button"
+                      className="wb-gallery-action wb-gallery-action--danger"
+                      onClick={() => removeGalleryItem(item.id)}
+                      title="Delete"
+                    >
+                      ×
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </aside>
+      ) : null}
+    </main>
+  )
+}
 
 function SearchIcon() {
   return (
@@ -117,6 +461,7 @@ function ThemeControl({ variant }) {
   return (
     <button
       type="button"
+      id="tour-theme-toggle"
       className="icon-btn theme-toggle"
       aria-label={mode === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
       title={mode === 'dark' ? 'Light mode' : 'Dark mode'}
@@ -416,6 +761,11 @@ function Navbar({ onProductGuide, onOpenSlack }) {
   }, [])
 
   useEffect(() => {
+    document.body.classList.toggle('mobile-nav-open', open)
+    return () => document.body.classList.remove('mobile-nav-open')
+  }, [open])
+
+  useEffect(() => {
     if (!menuOpen) return
     function onPointerDown(e) {
       if (headerRef.current && !headerRef.current.contains(e.target)) {
@@ -441,9 +791,13 @@ function Navbar({ onProductGuide, onOpenSlack }) {
         label: 'Interactive product tour',
         onAction: () => onProductGuide?.(),
       },
-      { label: 'Product overview', to: '/features' },
     ],
     [onProductGuide],
+  )
+
+  const navFeatures = useMemo(
+    () => buildNavFeatures({ onOpenSlack }),
+    [onOpenSlack],
   )
 
   return (
@@ -462,14 +816,7 @@ function Navbar({ onProductGuide, onOpenSlack }) {
           <NavDropdown
             id="features"
             label="Features"
-            items={NAV_FEATURES}
-            menuOpen={menuOpen}
-            setMenuOpen={setMenuOpen}
-          />
-          <NavDropdown
-            id="solutions"
-            label="Solutions"
-            items={NAV_SOLUTIONS}
+            items={navFeatures}
             menuOpen={menuOpen}
             setMenuOpen={setMenuOpen}
           />
@@ -483,24 +830,23 @@ function Navbar({ onProductGuide, onOpenSlack }) {
           />
           <button
             type="button"
+            id="tour-slack"
             className="nav-link nav-link-plain"
             onClick={() => {
               onOpenSlack?.()
               setMenuOpen(null)
             }}
           >
-            Slack
+            workSphere chat
           </button>
-          <a className="nav-link nav-link-plain" href="#">
-            Pricing
-          </a>
-          <Link
-            className="nav-link nav-link-plain subtle"
-            to="/#teams"
-            onClick={() => setMenuOpen(null)}
-          >
-            Teams
-          </Link>
+          <NavDropdown
+            id="teams"
+            label="Teams"
+            items={NAV_TEAMS}
+            menuOpen={menuOpen}
+            setMenuOpen={setMenuOpen}
+            hideChevron
+          />
           <NavDropdown
             id="more"
             label="More"
@@ -531,9 +877,9 @@ function Navbar({ onProductGuide, onOpenSlack }) {
             </Link>
           )}
           <button
-            className="icon-btn burger"
+            className={`icon-btn burger${open ? ' is-open' : ''}`}
             type="button"
-            aria-label="Open menu"
+            aria-label={open ? 'Close menu' : 'Open menu'}
             aria-expanded={open ? 'true' : 'false'}
             aria-controls="mobileMenu"
             onClick={() => setOpen((v) => !v)}
@@ -551,15 +897,7 @@ function Navbar({ onProductGuide, onOpenSlack }) {
             <MobileNavGroup
               id="features"
               label="Features"
-              items={NAV_FEATURES}
-              expandedId={mobileAccordion}
-              setExpandedId={setMobileAccordion}
-              onLinkNavigate={closeMobile}
-            />
-            <MobileNavGroup
-              id="solutions"
-              label="Solutions"
-              items={NAV_SOLUTIONS}
+              items={navFeatures}
               expandedId={mobileAccordion}
               setExpandedId={setMobileAccordion}
               onLinkNavigate={closeMobile}
@@ -580,11 +918,8 @@ function Navbar({ onProductGuide, onOpenSlack }) {
                 closeMobile()
               }}
             >
-              Slack
+              workSphere chat
             </button>
-            <a href="#" className="mobile-link" onClick={closeMobile}>
-              Pricing
-            </a>
             <MobileNavGroup
               id="more"
               label="More"
@@ -593,9 +928,14 @@ function Navbar({ onProductGuide, onOpenSlack }) {
               setExpandedId={setMobileAccordion}
               onLinkNavigate={closeMobile}
             />
-            <Link className="mobile-link" to="/#teams" onClick={closeMobile}>
-              Teams
-            </Link>
+            <MobileNavGroup
+              id="teams"
+              label="Teams"
+              items={NAV_TEAMS}
+              expandedId={mobileAccordion}
+              setExpandedId={setMobileAccordion}
+              onLinkNavigate={closeMobile}
+            />
             <ThemeControl variant="segmented" />
             <div className="mobile-cta">
               <a className="btn btn-primary full" href="#">
@@ -642,120 +982,13 @@ function Navbar({ onProductGuide, onOpenSlack }) {
   )
 }
 
-function Hero() {
-  return (
-    <section className="hero" id="tour-hero">
-      <div className="container hero-grid">
-        <div className="hero-copy">
-          <p className="eyebrow">PROJECT TRACKING FOR DEVELOPER TEAMS</p>
-          <h1 className="hero-title">
-            Manage projects, track work, and ship with clear priorities
-          </h1>
-          <p className="hero-subtitle">
-            workSphere is where your team plans work, sets priorities, follows tasks from idea to
-            release, and collaborates in one place—built for engineers who need visibility without
-            the noise.
-          </p>
-          <ul className="hero-bullets" aria-label="What you can do">
-            <li>Organize work into boards and backlogs</li>
-            <li>Assign owners, due dates, and priority</li>
-            <li>See status at a glance and unblock faster</li>
-          </ul>
-          <div className="hero-actions">
-            <a className="btn btn-primary large" href="#">Get workSphere free</a>
-          </div>
-        </div>
-
-        <div className="hero-media" aria-label="Product preview">
-          <div className="screenshot-card">
-            <div className="screenshot-top">
-              <div className="dot red" aria-hidden="true"></div>
-              <div className="dot yellow" aria-hidden="true"></div>
-              <div className="dot green" aria-hidden="true"></div>
-              <div className="screenshot-title">Team board</div>
-            </div>
-            <div className="screenshot-body">
-              <div className="board">
-                <div className="col">
-                  <div className="col-title">TO DO</div>
-                  <div className="card">
-                    <div className="tag">API</div>
-                    <div className="card-title">OpenAPI spec for search</div>
-                    <div className="meta">WSP-142</div>
-                  </div>
-                  <div className="card">
-                    <div className="tag">FRONTEND</div>
-                    <div className="card-title">Virtualize long issue lists</div>
-                    <div className="meta">WSP-156</div>
-                  </div>
-                </div>
-                <div className="col">
-                  <div className="col-title">IN PROGRESS</div>
-                  <div className="card">
-                    <div className="tag green">INFRA</div>
-                    <div className="card-title">Canary deploy for API</div>
-                    <div className="meta">WSP-089</div>
-                  </div>
-                  <div className="card">
-                    <div className="tag green">PLATFORM</div>
-                    <div className="card-title">Redis session migration</div>
-                    <div className="meta">WSP-201</div>
-                  </div>
-                </div>
-                <div className="col">
-                  <div className="col-title">DONE</div>
-                  <div className="card">
-                    <div className="tag purple">CI/CD</div>
-                    <div className="card-title">Release notes in Slack</div>
-                    <div className="meta">WSP-399</div>
-                  </div>
-                  <div className="card">
-                    <div className="tag purple">QA</div>
-                    <div className="card-title">Stabilize integration suite</div>
-                    <div className="meta">WSP-301</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="avatar-stack" aria-hidden="true">
-            <div className="avatar a1"></div>
-            <div className="avatar a2"></div>
-          </div>
-
-          <div className="floating-bubble bubble-1" aria-hidden="true"></div>
-          <div className="floating-bubble bubble-2" aria-hidden="true"></div>
-        </div>
-      </div>
-    </section>
-  )
-}
-
-function IntroBand() {
-  return (
-    <section className="intro-band" id="tour-intro" aria-label="About workSphere">
-      <div className="container">
-        <p className="intro-band-text">
-          Whether you run a small product squad or a larger engineering org, workSphere keeps
-          project context, task history, and team discussion together—so everyone knows what matters
-          now, what’s next, and what’s done.
-        </p>
-        <p className="intro-band-text intro-band-text--second">
-          Teams use workSphere to <strong>plan</strong>, <strong>track</strong>, and{' '}
-          <strong>collaborate</strong> on real software delivery.
-        </p>
-      </div>
-    </section>
-  )
-}
-
 function Home() {
   return (
     <main id="main">
       <div id="top"></div>
-      <Hero />
-      <IntroBand />
+      <HomeHero />
+      <HomeIntro />
+      <HomeCollab />
       <Teams />
       <SingleSource />
       <CollabReporting />
@@ -798,7 +1031,6 @@ function App() {
   }, [location.pathname])
 
   useEffect(() => {
-    if (location.pathname !== '/') return
     const next = new URLSearchParams(searchParams)
     let changed = false
 
@@ -810,6 +1042,10 @@ function App() {
         setSlackOpen(true)
         setSlackFocusRoomId(null)
       })
+      if (location.pathname !== '/') {
+        navigate({ pathname: '/', search: next.toString() ? `?${next}` : '' }, { replace: true })
+        return
+      }
     }
 
     const raw = searchParams.get('slack_room')
@@ -823,10 +1059,14 @@ function App() {
           setSlackFocusRoomId(id)
         })
       }
+      if (location.pathname !== '/') {
+        navigate({ pathname: '/', search: next.toString() ? `?${next}` : '' }, { replace: true })
+        return
+      }
     }
 
     if (changed) setSearchParams(next, { replace: true })
-  }, [location.pathname, searchParams, setSearchParams])
+  }, [location.pathname, navigate, searchParams, setSearchParams])
 
   return (
     <>
@@ -835,6 +1075,9 @@ function App() {
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/features" element={<AllFeatures />} />
+        <Route path="/teams/meet" element={<TeamsMeet />} />
+        <Route path="/whiteboard" element={<Whiteboard onOpenSlack={() => setSlackOpen(true)} />} />
+        <Route path="/todo" element={<Todo onOpenSlack={() => setSlackOpen(true)} />} />
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<Signup />} />
         <Route path="/join/:token" element={<JoinRoom />} />

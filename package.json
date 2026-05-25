@@ -4,14 +4,19 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently -n api,web -c green,cyan \"node server/index.js\" \"vite --host\"",
+    "start": "node server/index.js",
+    "dev": "concurrently -n api,web -c green,cyan --restart-tries 2 --restart-after 2000 \"node server/index.js\" \"vite --host\"",
+    "dev:restart": "node scripts/free-api-port.mjs && npm run dev",
+    "rebuild:sqlite": "npm rebuild better-sqlite3",
     "dev:web": "vite --host",
     "dev:full": "concurrently -n api,web -c green,cyan \"node server/index.js\" \"vite --host\"",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview --host"
+    "preview": "vite preview --host",
+    "postinstall": "npm rebuild better-sqlite3"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "^0.10.21",
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^12.8.0",
     "cors": "^2.8.6",
@@ -21,7 +26,8 @@
     "nodemailer": "^8.0.5",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "react-router-dom": "^7.14.0"
+    "react-router-dom": "^7.14.0",
+    "ws": "^8.20.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

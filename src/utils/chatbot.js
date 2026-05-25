@@ -1,28 +1,23 @@
 const QUICK_TOPICS = [
   {
-    id: 'getting-started',
-    title: 'Getting started',
-    prompts: ['How do I get started?', 'How do I navigate this site?'],
+    id: 'pm',
+    title: 'Project management',
+    prompts: ['How should we set up a simple Kanban workflow for our team?'],
   },
   {
-    id: 'workflow',
-    title: 'Workflow basics',
-    prompts: ['Explain a simple workflow', 'Kanban vs Scrum'],
+    id: 'worksphere',
+    title: 'workSphere help',
+    prompts: ['How do I use workSphere chat and team channels?'],
   },
   {
     id: 'tickets',
-    title: 'Tickets & statuses',
-    prompts: ['What statuses should we use?', 'How do I track progress?'],
+    title: 'Tickets & boards',
+    prompts: ['What makes a good ticket on a shared board?'],
   },
   {
-    id: 'reports',
-    title: 'Reporting',
-    prompts: ['How do reports help?', 'What metrics should I track?'],
-  },
-  {
-    id: 'auth',
-    title: 'Login & signup',
-    prompts: ['How do I sign up?', 'I can’t log in'],
+    id: 'general',
+    title: 'Ask anything',
+    prompts: ['Explain Scrum vs Kanban in simple terms'],
   },
 ]
 

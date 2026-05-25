@@ -50,11 +50,11 @@ export default function CollabReporting() {
       <div className="container">
         <div className="feature-row feature-row-right">
           <div className="feature-copy">
-            <p className="feature-kicker">COLLABORATION</p>
-            <h3 className="feature-title">More collaboration, less context switching</h3>
+            <p className="feature-kicker">TEAM CONVERSATIONS</p>
+            <h3 className="feature-title">Talk about the work where the work lives</h3>
             <p className="feature-desc">
-              Communication is easy when details like business context, project requirements, QA
-              comments, and design files are all in one place.
+              Threads, mentions, and updates stay on tasks and projects—so your team resolves questions
+              together instead of losing context across email and side chats.
             </p>
           </div>
           <div className="feature-media">
@@ -67,11 +67,11 @@ export default function CollabReporting() {
             <Frame tone="blue" variant="report" />
           </div>
           <div className="feature-copy">
-            <p className="feature-kicker">REPORTING</p>
-            <h3 className="feature-title">Always informed, always prepared</h3>
+            <p className="feature-kicker">TEAM VISIBILITY</p>
+            <h3 className="feature-title">Support your team without micromanaging</h3>
             <p className="feature-desc">
-              Catch blockers and better support your team when you have a clear view of
-              dependencies, work progress, and resourcing.
+              See who is stuck, what depends on what, and how collaboration is flowing—so leads can
+              unblock people and celebrate progress with real data.
             </p>
           </div>
         </div>

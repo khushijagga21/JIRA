@@ -1,34 +1,69 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { getPublicAppOrigin, inviteLinksNeedLanSetup } from '../utils/publicAppUrl.js'
+import { Link } from 'react-router-dom'
+import { getPublicAppOrigin } from '../utils/publicAppUrl.js'
+import { useResolvedAppOrigin } from '../utils/useResolvedAppOrigin.js'
+import workSphereLogo from '../assets/worksphere-logo.png'
+import { fetchApi } from '../utils/apiFetch.js'
+import { getCurrentUser } from '../utils/auth.js'
 import { clearCollabIdentity, loadCollabIdentity, saveCollabIdentity } from '../utils/collabIdentity.js'
 import { clearLastCollabRoomId, setLastCollabRoomId } from '../utils/collabLastRoom.js'
+import {
+  consumePendingChatShare,
+  dataUrlToFile,
+  peekPendingChatShare,
+  clearPendingChatShare,
+} from '../utils/whiteboardStore.js'
+import {
+  consumePendingTaskShare,
+  peekPendingTaskShare,
+  clearPendingTaskShare,
+  formatTaskMessage,
+} from '../utils/todoShare.js'
+import WspChatHome from './WspChatHome.jsx'
 
-const MAX_MEMBERS = 200
-const WORKSPACE_NAME = 'workSphere'
+const MEMBER_LIMIT_CAP = 200
+const MEMBER_LIMIT_MIN = 2
+const WORKSPACE_NAME = 'workSphere chat'
 const PICKER_PAGE_SIZE = 5
+const CONNECTION_ERROR_MSG =
+  'Could not reach the workSphere API. Run the app with npm run dev locally, or set VITE_API_URL in Vercel to your deployed backend URL.'
+const MESSAGE_EDIT_WINDOW_MS = 2 * 60 * 1000
 
 function channelHue(roomId) {
   const hues = [268, 330, 196, 18, 204, 152, 310, 48]
   return hues[Number(roomId) % hues.length]
 }
 
+function isNetworkFailure(err) {
+  return err instanceof TypeError || /failed to fetch|network/i.test(String(err?.message ?? ''))
+}
+
 async function apiJson(path, options) {
-  const res = await fetch(path, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
-  })
+  let res
+  try {
+    res = await fetchApi(path, {
+      ...options,
+      headers: { 'Content-Type': 'application/json', ...options?.headers },
+    })
+  } catch (err) {
+    const e = new Error('network_error')
+    e.network = isNetworkFailure(err)
+    throw e
+  }
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
     const err = new Error(String(data?.reason || res.statusText || 'request_failed'))
     err.reason = data?.reason
+    if (data?.memberLimit != null) err.memberLimit = Number(data.memberLimit)
     throw err
   }
   return data
 }
 
-function errorMessage(reason) {
-  if (reason === 'room_full') return `This room is full (${MAX_MEMBERS} people max).`
+function errorMessage(reason, memberLimit) {
+  const cap = Number.isFinite(memberLimit) ? memberLimit : MEMBER_LIMIT_CAP
+  if (reason === 'room_full') return `This room is full (${cap} people max).`
   if (reason === 'not_a_member') return 'You are not in this room. Join with an invite link first.'
   return null
 }
@@ -67,10 +102,56 @@ function formatMsgTime(ts) {
   return new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
 }
 
+function messageIsDeleted(m) {
+  return Boolean(m.deleted_at)
+}
+
+function messageWasEdited(m) {
+  return Boolean(m.updated_at && !m.deleted_at && Number(m.updated_at) > Number(m.created_at) + 500)
+}
+
+function canEditMessage(m, viewerEmail) {
+  if (!viewerEmail || messageIsDeleted(m)) return false
+  if (m.author_email?.toLowerCase() !== viewerEmail.toLowerCase()) return false
+  if (!String(m.body ?? '').trim()) return false
+  return Date.now() - Number(m.created_at) < MESSAGE_EDIT_WINDOW_MS
+}
+
+function canDeleteMessage(m, viewerEmail) {
+  if (!viewerEmail || messageIsDeleted(m)) return false
+  return m.author_email?.toLowerCase() === viewerEmail.toLowerCase()
+}
+
 function normIncludes(hay, needle) {
   const n = String(needle ?? '').trim().toLowerCase()
   if (!n) return true
   return String(hay ?? '').toLowerCase().includes(n)
+}
+
+function CollabInlineImage({ href, alt, imgClass }) {
+  const [broken, setBroken] = useState(false)
+  if (broken) {
+    return (
+      <div className="slack-msg-img-fallback">
+        <span className="slack-msg-img-fallback-text">Preview unavailable.</span>{' '}
+        <a href={href} target="_blank" rel="noreferrer" className="slack-msg-file-link">
+          Open image
+        </a>
+      </div>
+    )
+  }
+  return (
+    <a href={href} target="_blank" rel="noreferrer" className="slack-msg-img-wrap">
+      <img
+        src={href}
+        alt={alt}
+        className={imgClass}
+        loading="lazy"
+        decoding="async"
+        onError={() => setBroken(true)}
+      />
+    </a>
+  )
 }
 
 export default function SlackCollaboration({ open, onClose, focusRoomId, onFocusRoomConsumed }) {
@@ -84,6 +165,9 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
   const [apiError, setApiError] = useState(null)
   const [showCreate, setShowCreate] = useState(false)
   const [newRoomName, setNewRoomName] = useState('')
+  const [newRoomMemberLimit, setNewRoomMemberLimit] = useState(MEMBER_LIMIT_CAP)
+  const [createError, setCreateError] = useState(null)
+  const [createBusy, setCreateBusy] = useState(false)
   const [copyDone, setCopyDone] = useState(false)
   const [invitePeerEmail, setInvitePeerEmail] = useState('')
   const [inviteBusy, setInviteBusy] = useState(false)
@@ -98,11 +182,34 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
   const [jumpToQuery, setJumpToQuery] = useState('')
   const [dmPeer, setDmPeer] = useState(null)
   const [pendingScrollMessageId, setPendingScrollMessageId] = useState(null)
+  const [topChannelSearchOpen, setTopChannelSearchOpen] = useState(false)
+  const [toast, setToast] = useState(null)
+  const [channelsOpen, setChannelsOpen] = useState(true)
+  const [dmsOpen, setDmsOpen] = useState(true)
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
+  const [editingMessageId, setEditingMessageId] = useState(null)
+  const [editDraft, setEditDraft] = useState('')
+  const [openMessageMenuId, setOpenMessageMenuId] = useState(null)
+  const [messageActionBusy, setMessageActionBusy] = useState(false)
+  const [pendingShare, setPendingShare] = useState(null)
+  const [pendingShareBusy, setPendingShareBusy] = useState(false)
+  const [pendingTaskShare, setPendingTaskShare] = useState(null)
+  const [pendingTaskShareBusy, setPendingTaskShareBusy] = useState(false)
+  const [, setEditTick] = useState(0)
   const prevOpenRef = useRef(false)
   const listRef = useRef(null)
   const fileInputRef = useRef(null)
-  const dmSectionRef = useRef(null)
   const searchBlurTimerRef = useRef(null)
+  const topSearchInputRef = useRef(null)
+  const toastTimerRef = useRef(null)
+  const resolvedOrigin = useResolvedAppOrigin()
+
+  const showToast = useCallback((message) => {
+    if (!message) return
+    setToast(message)
+    window.clearTimeout(toastTimerRef.current)
+    toastTimerRef.current = window.setTimeout(() => setToast(null), 2800)
+  }, [])
 
   const refreshIdentity = useCallback(() => {
     setIdentity(loadCollabIdentity())
@@ -118,6 +225,36 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
       cancelled = true
     }
   }, [open, refreshIdentity])
+
+  useEffect(() => {
+    if (!open) return
+    document.documentElement.classList.add('slack-overlay-open')
+    document.body.classList.add('slack-overlay-open')
+    return () => {
+      document.documentElement.classList.remove('slack-overlay-open')
+      document.body.classList.remove('slack-overlay-open')
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (!open) setMobileSidebarOpen(false)
+  }, [open])
+
+  useEffect(() => {
+    function onResize() {
+      if (window.matchMedia('(min-width: 721px)').matches) setMobileSidebarOpen(false)
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  useEffect(() => {
+    if (!open || identity) return
+    const u = getCurrentUser()
+    if (!u) return
+    setSetupName((n) => n || u.name || '')
+    setSetupEmail((e) => e || u.email || '')
+  }, [open, identity])
 
   useEffect(() => {
     if (!open) {
@@ -154,9 +291,27 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
       setWorkspaceSearchOpen(false)
       setJumpToQuery('')
       setPendingScrollMessageId(null)
+      setTopChannelSearchOpen(false)
+      setEditingMessageId(null)
+      setEditDraft('')
+      setOpenMessageMenuId(null)
     })
     return () => cancelAnimationFrame(frame)
   }, [roomId])
+
+  useEffect(() => {
+    if (openMessageMenuId == null) return
+    function onDocPointerDown(e) {
+      if (!e.target.closest('.slack-msg-menu-wrap')) setOpenMessageMenuId(null)
+    }
+    document.addEventListener('mousedown', onDocPointerDown)
+    return () => document.removeEventListener('mousedown', onDocPointerDown)
+  }, [openMessageMenuId])
+
+  useEffect(() => {
+    if (!topChannelSearchOpen) return
+    queueMicrotask(() => topSearchInputRef.current?.focus())
+  }, [topChannelSearchOpen])
 
   useEffect(() => {
     let frame = requestAnimationFrame(() => {
@@ -205,10 +360,8 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
         if (prev != null && list.some((r) => r.id === prev)) return prev
         return null
       })
-    } catch {
-      setApiError(
-        'Could not reach the collaboration server. Run npm run dev so the API is available on port 8787.',
-      )
+    } catch (e) {
+      setApiError(isNetworkFailure(e) || e?.network ? CONNECTION_ERROR_MSG : 'Could not load your channels.')
       setRooms([])
     }
   }, [])
@@ -227,7 +380,7 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
       if (e?.reason === 'not_a_member') {
         setRoomId(null)
       }
-      const msg = errorMessage(e.reason)
+      const msg = errorMessage(e.reason, e.memberLimit)
       if (msg) setApiError(msg)
       else setApiError('Could not load this room.')
     }
@@ -269,12 +422,22 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
     function onKey(e) {
       if (e.key === 'Escape') {
         if (detailsOpen) setDetailsOpen(false)
-        else onClose()
+        else if (topChannelSearchOpen) {
+          setTopChannelSearchOpen(false)
+          setWorkspaceSearchQuery('')
+          setWorkspaceSearchOpen(false)
+        } else onClose()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [open, onClose, detailsOpen])
+  }, [open, onClose, detailsOpen, topChannelSearchOpen])
+
+  useEffect(() => {
+    if (!open || mainTab !== 'messages') return
+    const t = window.setInterval(() => setEditTick((n) => n + 1), 10000)
+    return () => window.clearInterval(t)
+  }, [open, mainTab])
 
   useEffect(() => {
     if (!open || !listRef.current || mainTab !== 'messages') return
@@ -313,6 +476,13 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
     setRoomId(id)
     setSessionView('chat')
     setPickerExpanded(false)
+    setDmPeer(null)
+    setApiError(null)
+  }
+
+  function selectChannel(id) {
+    enterChannel(id)
+    setMobileSidebarOpen(false)
   }
 
   function leaveToPicker() {
@@ -325,12 +495,15 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
     setWorkspaceSearchQuery('')
     setWorkspaceSearchOpen(false)
     setJumpToQuery('')
+    setTopChannelSearchOpen(false)
+    setMobileSidebarOpen(false)
   }
 
   function openSearchResultMessage(messageId) {
     setMainTab('messages')
     setWorkspaceSearchQuery('')
     setWorkspaceSearchOpen(false)
+    setTopChannelSearchOpen(false)
     setPendingScrollMessageId(messageId)
   }
 
@@ -338,6 +511,7 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
     setMainTab('files')
     setWorkspaceSearchQuery('')
     setWorkspaceSearchOpen(false)
+    setTopChannelSearchOpen(false)
     setPendingScrollMessageId(null)
     queueMicrotask(() => {
       const el = document.querySelector(`[data-slack-file-msg-id="${messageId}"]`)
@@ -345,41 +519,64 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
     })
   }
 
+  function openCreateModal() {
+    setCreateError(null)
+    setNewRoomMemberLimit(MEMBER_LIMIT_CAP)
+    setShowCreate(true)
+  }
+
   async function createRoom(e) {
     e.preventDefault()
-    if (!identity) return
+    if (!identity || createBusy) return
     const name = newRoomName.trim()
     if (!name) return
+    setCreateBusy(true)
+    setCreateError(null)
+    setApiError(null)
     try {
-      setApiError(null)
       const data = await apiJson('/api/collab/rooms', {
         method: 'POST',
         body: JSON.stringify({
           name,
           creatorEmail: identity.email,
           creatorName: identity.name,
+          memberLimit: Number(newRoomMemberLimit),
         }),
       })
       setNewRoomName('')
+      setNewRoomMemberLimit(MEMBER_LIMIT_CAP)
       setShowCreate(false)
+      setCreateError(null)
       setSessionView('chat')
       if (data.room?.id) setRoomId(data.room.id)
       await loadRooms(identity.email)
-    } catch {
-      setApiError('Could not create group.')
+      showToast(`Channel “${name}” created`)
+    } catch (e) {
+      const msg =
+        isNetworkFailure(e) || e?.network
+          ? CONNECTION_ERROR_MSG
+          : 'Could not create this channel. Try another name or check your connection.'
+      setCreateError(msg)
+    } finally {
+      setCreateBusy(false)
     }
   }
 
   async function copyInviteLink() {
     const tok = roomDetail?.room?.invite_token
-    if (!tok) return
-    const url = `${getPublicAppOrigin()}/join/${tok}`
+    if (!tok) {
+      showToast('Invite link is not ready yet. Wait a moment and try again.')
+      return
+    }
+    const base = inviteBaseUrl || getPublicAppOrigin()
+    const url = `${base}/join/${tok}`
     try {
       await navigator.clipboard.writeText(url)
       setCopyDone(true)
+      showToast('Invite link copied!')
       window.setTimeout(() => setCopyDone(false), 2000)
     } catch {
-      setApiError('Could not copy—copy the link manually.')
+      showToast('Could not copy. Select the link and copy it manually.')
     }
   }
 
@@ -391,7 +588,7 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
     setInviteBusy(true)
     setInviteNotice(null)
     try {
-      const res = await fetch(`/api/collab/rooms/${roomId}/email-invite`, {
+      const res = await fetchApi(`/api/collab/rooms/${roomId}/email-invite`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -410,7 +607,8 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
         } else if (data.reason === 'already_member') {
           setInviteNotice('That address is already in this channel.')
         } else if (data.reason === 'room_full') {
-          setInviteNotice('Channel is full (200 people).')
+          const lim = Number(data.memberLimit) || MEMBER_LIMIT_CAP
+          setInviteNotice(`Channel is full (${lim} people max).`)
         } else {
           setInviteNotice(data.message || 'Could not send invitation.')
         }
@@ -420,10 +618,96 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
       setInvitePeerEmail('')
       const extra = data.acceptUrl ? ` If email didn’t send: ${data.acceptUrl}` : ''
       setInviteNotice((data.message || 'Invitation sent.') + extra)
+      showToast('Invitation sent')
     } catch {
       setInviteNotice('Network error.')
     }
     setInviteBusy(false)
+  }
+
+  useEffect(() => {
+    if (!open) {
+      setPendingShare(null)
+      setPendingTaskShare(null)
+      return
+    }
+    const pending = peekPendingChatShare()
+    if (pending?.dataUrl) setPendingShare(pending)
+    const pendingTask = peekPendingTaskShare()
+    if (pendingTask?.title) setPendingTaskShare(pendingTask)
+  }, [open])
+
+  async function sendPendingTaskToRoom() {
+    if (!identity || !roomId || !pendingTaskShare?.title) return
+    const body = formatTaskMessage(pendingTaskShare)
+    if (!body.trim()) return
+    setPendingTaskShareBusy(true)
+    setApiError(null)
+    try {
+      await apiJson(`/api/collab/rooms/${roomId}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({
+          authorEmail: identity.email,
+          authorName: identity.name,
+          body,
+        }),
+      })
+      consumePendingTaskShare()
+      setPendingTaskShare(null)
+      showToast('Task shared in the channel')
+      await loadRoomDetail(roomId, identity.email)
+      await loadRooms(identity.email)
+      setMainTab('messages')
+    } catch {
+      setApiError('Could not share the task.')
+    }
+    setPendingTaskShareBusy(false)
+  }
+
+  function discardPendingTaskShare() {
+    clearPendingTaskShare()
+    setPendingTaskShare(null)
+  }
+
+  async function sendPendingShareToRoom() {
+    if (!identity || !roomId || !pendingShare?.dataUrl) return
+    const file = dataUrlToFile(
+      pendingShare.dataUrl,
+      `${(pendingShare.name || 'worksphere-drawing').replace(/[^a-z0-9-_]+/gi, '-').slice(0, 60) || 'worksphere-drawing'}.png`,
+    )
+    if (!file) {
+      setApiError('Could not prepare the drawing for upload.')
+      return
+    }
+    setPendingShareBusy(true)
+    setApiError(null)
+    const fd = new FormData()
+    fd.append('file', file)
+    fd.append('authorEmail', identity.email)
+    fd.append('authorName', identity.name)
+    fd.append('caption', `🎨 Whiteboard: ${pendingShare.name || 'Untitled drawing'}`)
+    try {
+      const res = await fetchApi(`/api/collab/rooms/${roomId}/upload`, { method: 'POST', body: fd })
+      if (!res.ok) {
+        setApiError('Could not send the drawing.')
+        setPendingShareBusy(false)
+        return
+      }
+      consumePendingChatShare()
+      setPendingShare(null)
+      showToast('Drawing sent to the channel')
+      await loadRoomDetail(roomId, identity.email)
+      await loadRooms(identity.email)
+      setMainTab('messages')
+    } catch {
+      setApiError('Could not send the drawing.')
+    }
+    setPendingShareBusy(false)
+  }
+
+  function discardPendingShare() {
+    clearPendingChatShare()
+    setPendingShare(null)
   }
 
   async function onPickFile(e) {
@@ -441,7 +725,7 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
       setComposer('')
     }
     try {
-      const res = await fetch(`/api/collab/rooms/${roomId}/upload`, { method: 'POST', body: fd })
+      const res = await fetchApi(`/api/collab/rooms/${roomId}/upload`, { method: 'POST', body: fd })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
         if (data.reason === 'unsupported_file_type') {
@@ -480,18 +764,96 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
       await loadRoomDetail(roomId, identity.email)
       await loadRooms(identity.email)
     } catch (err) {
-      const msg = errorMessage(err.reason)
+      const msg = errorMessage(err.reason, err.memberLimit)
       setApiError(msg || 'Could not send message.')
     }
+  }
+
+  function cancelEditMessage() {
+    setEditingMessageId(null)
+    setEditDraft('')
+  }
+
+  function startEditMessage(m) {
+    setOpenMessageMenuId(null)
+    setEditingMessageId(m.id)
+    setEditDraft(String(m.body ?? ''))
+    setApiError(null)
+  }
+
+  async function saveEditMessage() {
+    if (!identity || !roomId || editingMessageId == null) return
+    const body = editDraft.trim()
+    if (!body) {
+      setApiError('Message cannot be empty. Delete it instead if you want to remove it.')
+      return
+    }
+    setMessageActionBusy(true)
+    try {
+      setApiError(null)
+      await apiJson(`/api/collab/rooms/${roomId}/messages/${editingMessageId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ authorEmail: identity.email, body }),
+      })
+      cancelEditMessage()
+      showToast('Message updated')
+      await loadRoomDetail(roomId, identity.email)
+    } catch (err) {
+      if (err?.reason === 'edit_window_expired') {
+        setApiError('You can only edit a message within 2 minutes of sending it.')
+        cancelEditMessage()
+      } else {
+        setApiError('Could not update this message.')
+      }
+    }
+    setMessageActionBusy(false)
+  }
+
+  async function deleteMessage(m) {
+    if (!identity || !roomId || messageIsDeleted(m)) return
+    setOpenMessageMenuId(null)
+    if (!window.confirm('Delete this message for everyone in the channel?')) return
+    setMessageActionBusy(true)
+    try {
+      setApiError(null)
+      await apiJson(`/api/collab/rooms/${roomId}/messages/${m.id}`, {
+        method: 'DELETE',
+        body: JSON.stringify({ authorEmail: identity.email }),
+      })
+      if (editingMessageId === m.id) cancelEditMessage()
+      showToast('Message deleted')
+      await loadRoomDetail(roomId, identity.email)
+    } catch {
+      setApiError('Could not delete this message.')
+    }
+    setMessageActionBusy(false)
   }
 
   const messages = useMemo(() => roomDetail?.messages ?? [], [roomDetail])
   const members = useMemo(() => roomDetail?.members ?? [], [roomDetail])
   const roomName = roomDetail?.room?.name ?? ''
   const memberCount = members.length
+  const roomMemberLimit = useMemo(() => {
+    const raw = Number(roomDetail?.room?.member_limit)
+    if (!Number.isFinite(raw)) return MEMBER_LIMIT_CAP
+    return Math.min(MEMBER_LIMIT_CAP, Math.max(MEMBER_LIMIT_MIN, Math.round(raw)))
+  }, [roomDetail?.room?.member_limit])
   const inviteToken = roomDetail?.room?.invite_token
-  const inviteUrl = inviteToken ? `${getPublicAppOrigin()}/join/${inviteToken}` : ''
-  const showPhoneInviteHint = inviteLinksNeedLanSetup()
+  const inviteBaseUrl = useMemo(() => {
+    if (resolvedOrigin.origin) return resolvedOrigin.origin
+    if (resolvedOrigin.loading) return ''
+    return getPublicAppOrigin()
+  }, [resolvedOrigin.origin, resolvedOrigin.loading])
+  const inviteUrl = inviteToken && inviteBaseUrl ? `${inviteBaseUrl}/join/${inviteToken}` : ''
+  const showLocalhostInviteHint = useMemo(() => {
+    if (!inviteBaseUrl) return false
+    try {
+      const h = new URL(inviteBaseUrl).hostname.toLowerCase()
+      return h === 'localhost' || h === '127.0.0.1'
+    } catch {
+      return inviteBaseUrl.includes('localhost')
+    }
+  }, [inviteBaseUrl])
 
   const visibleMessages = useMemo(() => {
     if (!dmPeer || !identity?.email) return messages
@@ -505,8 +867,6 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
 
   const fileMessages = useMemo(() => visibleMessages.filter((m) => m.attachment_stored), [visibleMessages])
   const messageGroups = useMemo(() => groupMessagesByAuthor(visibleMessages), [visibleMessages])
-  const activityFeedNewestFirst = useMemo(() => [...visibleMessages].reverse().slice(0, 40), [visibleMessages])
-
   const workspaceSearchHits = useMemo(() => {
     const q = workspaceSearchQuery.trim().toLowerCase()
     if (q.length < 2) return { textMessages: [], documents: [] }
@@ -542,7 +902,7 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
   const pickRoom = identity && sessionView === 'chat' && rooms.length > 0 && roomId == null
   const visiblePickerRooms = pickerExpanded ? rooms : rooms.slice(0, PICKER_PAGE_SIZE)
   const hiddenPickerCount = Math.max(0, rooms.length - PICKER_PAGE_SIZE)
-  const canPost = memberCount < MAX_MEMBERS
+  const canPost = memberCount < roomMemberLimit
 
   const inviteDetailsSection = roomId ? (
     <div className="slack-drawer-inner">
@@ -560,7 +920,7 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
           onChange={(e) => setInvitePeerEmail(e.target.value)}
           aria-label="Invitee email"
         />
-        <button type="submit" className="slack-btn slack-btn-secondary" disabled={inviteBusy || memberCount >= MAX_MEMBERS}>
+        <button type="submit" className="slack-btn slack-btn-secondary" disabled={inviteBusy || memberCount >= roomMemberLimit}>
           {inviteBusy ? 'Sending…' : 'Send'}
         </button>
       </form>
@@ -568,10 +928,11 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
 
       <div className="slack-invite-label slack-invite-label--second">Or copy link</div>
       <p className="slack-invite-hint slack-invite-hint--muted">Anyone with the link can join until the channel is full.</p>
-      {showPhoneInviteHint ? (
+      {showLocalhostInviteHint ? (
         <p className="slack-invite-hint slack-invite-hint--warn" role="note">
-          <strong>Another device?</strong> Use your LAN URL from the terminal or set <code>VITE_PUBLIC_APP_URL</code> and
-          allow TCP <strong>5173</strong> in the firewall.
+          <strong>Phones need a public URL.</strong> Set <code>VITE_PUBLIC_APP_URL</code> or <code>VITE_WORKSPHERE_PUBLIC_URL</code>{' '}
+          (or <code>WORKSPHERE_PUBLIC_URL</code> on the server) to your live workSphere domain, or open this app using the
+          Wi‑Fi address shown in the terminal instead of localhost.
         </p>
       ) : null}
       <div className="slack-invite-row">
@@ -591,11 +952,8 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
       <div className="slack-shell">
         {!identity ? (
           <div className="slack-setup">
-            <h2 className="slack-setup-title">Sign in to {WORKSPACE_NAME}</h2>
-            <p className="slack-setup-desc">
-              Choose how you appear. This can differ from your workSphere login (e.g. testing on a phone). Submitting
-              overrides chat identity until you use “Use different identity”.
-            </p>
+            <h2 className="slack-setup-title">Join workSphere chat</h2>
+            <p className="slack-setup-desc">Enter your name and email. We use this to show who sent each message.</p>
             <form className="slack-setup-form" onSubmit={onSetupSubmit}>
               <label className="slack-label">
                 Display name
@@ -620,7 +978,7 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                 />
               </label>
               <button className="slack-btn slack-btn-primary" type="submit">
-                Continue to workspace
+                Continue
               </button>
             </form>
             <button type="button" className="slack-btn slack-btn-ghost slack-setup-close" onClick={onClose}>
@@ -630,221 +988,178 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
         ) : (
           <>
             {sessionView === 'picker' ? (
-              <div className="slack-picker-screen">
-                <button type="button" className="slack-picker-close" onClick={onClose} aria-label="Close">
-                  ×
-                </button>
-                <div className="slack-picker-inner">
-                  <h1 className="slack-picker-title" id="slack-room-title">
-                    Welcome back!
-                  </h1>
-                  <p className="slack-picker-subtitle">
-                    Choose a channel below to get back to working with your team.
-                  </p>
-                  <p className="slack-picker-account">
-                    <span className="slack-picker-account-label">Ready to launch ·</span>{' '}
-                    <strong>{identity.email}</strong>
-                  </p>
-                  {apiError ? <div className="slack-banner slack-banner--picker">{apiError}</div> : null}
-                  <div className="slack-picker-card">
-                    {rooms.length === 0 ? (
-                      <div className="slack-picker-empty">
-                        <p className="slack-picker-empty-text">
-                          You’re not in any channels yet. Join with an invite link or create your first channel.
-                        </p>
-                        <button type="button" className="slack-btn slack-btn-primary" onClick={() => setShowCreate(true)}>
-                          Create a channel
-                        </button>
-                      </div>
-                    ) : (
-                      <>
-                        <ul className="slack-picker-list" aria-label="Channels you’ve joined">
-                          {visiblePickerRooms.map((r) => (
-                            <li key={r.id}>
-                              <button type="button" className="slack-picker-row" onClick={() => enterChannel(r.id)}>
-                                <div
-                                  className="slack-picker-logo"
-                                  style={{ '--slack-picker-h': channelHue(r.id) }}
-                                >
-                                  {memberInitials(r.name, `${r.name}@local`).slice(0, 2)}
-                                </div>
-                                <div className="slack-picker-row-body">
-                                  <div className="slack-picker-row-name">
-                                    <span className="slack-picker-hash">#</span>
-                                    {r.name}
-                                  </div>
-                                  <div className="slack-picker-row-meta">
-                                    <span className="slack-picker-facepile">
-                                      {(r.preview_members || []).map((m, i) => (
-                                        <span
-                                          key={`${r.id}-${m.email}-${i}`}
-                                          className="slack-picker-face"
-                                          style={{ zIndex: 4 - i }}
-                                          title={m.name}
-                                        >
-                                          {memberInitials(m.name, m.email)}
-                                        </span>
-                                      ))}
-                                    </span>
-                                    <span className="slack-picker-member-count">
-                                      {(r.member_count ?? 0).toLocaleString()} member
-                                      {(r.member_count ?? 0) === 1 ? '' : 's'}
-                                    </span>
-                                  </div>
-                                </div>
-                                <span className="slack-picker-arrow" aria-hidden>
-                                  <svg width="20" height="20" viewBox="0 0 24 24">
-                                    <path
-                                      fill="currentColor"
-                                      d="M19 19H5V5h7V3H5a2 2 0 00-2 2v14c0 1.1.9 2 2 2h14a2 2 0 002-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"
-                                    />
-                                  </svg>
-                                </span>
-                              </button>
-                            </li>
-                          ))}
-                        </ul>
-                        {hiddenPickerCount > 0 && !pickerExpanded ? (
-                          <button type="button" className="slack-picker-more" onClick={() => setPickerExpanded(true)}>
-                            Show {hiddenPickerCount} more channel{hiddenPickerCount === 1 ? '' : 's'}{' '}
-                            <span className="slack-picker-more-chev" aria-hidden>
-                              ▾
-                            </span>
-                          </button>
-                        ) : null}
-                        <button
-                          type="button"
-                          className="slack-picker-add-channel"
-                          onClick={() => setShowCreate(true)}
-                        >
-                          + Create channel
-                        </button>
-                      </>
-                    )}
-                  </div>
-                  {identity.source === 'session' ? (
-                    <button
-                      type="button"
-                      className="slack-picker-switch-account"
-                      onClick={() => {
-                        clearLastCollabRoomId(identity.email)
-                        clearCollabIdentity()
-                        setIdentity(null)
-                        setSetupName('')
-                        setSetupEmail('')
-                        setRooms([])
-                        setRoomId(null)
-                        setRoomDetail(null)
-                      }}
-                    >
-                      Switch account
-                    </button>
-                  ) : null}
-                </div>
-              </div>
+              <WspChatHome
+                identity={identity}
+                rooms={rooms}
+                visibleRooms={visiblePickerRooms}
+                hiddenCount={hiddenPickerCount}
+                pickerExpanded={pickerExpanded}
+                apiError={apiError}
+                showCreate={showCreate}
+                maxMembers={MEMBER_LIMIT_CAP}
+                channelHue={channelHue}
+                memberInitials={memberInitials}
+                onClose={onClose}
+                onCreate={openCreateModal}
+                onOpenRoom={enterChannel}
+                onShowMore={() => setPickerExpanded(true)}
+                onSwitchAccount={() => {
+                  clearLastCollabRoomId(identity.email)
+                  clearCollabIdentity()
+                  setIdentity(null)
+                  setSetupName('')
+                  setSetupEmail('')
+                  setRooms([])
+                  setRoomId(null)
+                  setRoomDetail(null)
+                }}
+              />
             ) : (
               <>
                 <div className="slack-app-layout">
               <header className="slack-topbar">
                 <button type="button" className="slack-topbar-back" onClick={leaveToPicker}>
-                  ← All channels
+                  <span className="slack-topbar-back-short" aria-hidden>
+                    ←
+                  </span>
+                  <span className="slack-topbar-back-label">All channels</span>
                 </button>
-                <div className="slack-topbar-search-outer">
-                  <div className="slack-topbar-search-wrap">
-                    <svg className="slack-topbar-search-svg" width="18" height="18" viewBox="0 0 24 24" aria-hidden>
-                      <path
-                        fill="currentColor"
-                        d="M10 2a8 8 0 105.293 14.707l4.387 4.387 1.414-1.414-4.387-4.387A8 8 0 0010 2zm0 2a6 6 0 110 12 6 6 0 010-12z"
-                      />
-                    </svg>
-                    <input
-                      type="search"
-                      className="slack-topbar-search"
-                      placeholder={`Search messages & files in #${roomName || 'channel'}`}
-                      value={workspaceSearchQuery}
-                      onChange={(e) => {
-                        setWorkspaceSearchQuery(e.target.value)
-                        setWorkspaceSearchOpen(true)
-                      }}
-                      onFocus={() => {
-                        window.clearTimeout(searchBlurTimerRef.current)
-                        setWorkspaceSearchOpen(true)
-                      }}
-                      onBlur={() => {
-                        searchBlurTimerRef.current = window.setTimeout(() => setWorkspaceSearchOpen(false), 220)
-                      }}
-                      aria-label="Search messages and documents in this channel"
-                      autoComplete="off"
+                <button
+                  type="button"
+                  className={`slack-topbar-channels-btn${mobileSidebarOpen ? ' is-active' : ''}`}
+                  aria-label={mobileSidebarOpen ? 'Close channels menu' : 'Open channels menu'}
+                  aria-expanded={mobileSidebarOpen ? 'true' : 'false'}
+                  onClick={() => setMobileSidebarOpen((v) => !v)}
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden>
+                    <path
+                      fill="currentColor"
+                      d="M3 6h18v2H3V6zm0 5h12v2H3v-2zm0 5h18v2H3v-2z"
                     />
-                  </div>
-                  {workspaceSearchOpen && workspaceSearchQuery.trim().length >= 2 ? (
-                    <div
-                      className="slack-search-dropdown"
-                      role="listbox"
-                      aria-label="Search results"
-                      onMouseDown={(e) => e.preventDefault()}
+                  </svg>
+                  <span className="slack-topbar-channels-label">Channels</span>
+                </button>
+                {!topChannelSearchOpen ? (
+                  <>
+                    <div className="slack-topbar-spacer" aria-hidden />
+                    <button
+                      type="button"
+                      className={`slack-topbar-icon-btn${workspaceSearchQuery.trim() ? ' is-active' : ''}`}
+                      aria-label="Search this channel"
+                      title="Search messages and files"
+                      onClick={() => setTopChannelSearchOpen(true)}
                     >
-                      {workspaceSearchHits.textMessages.length === 0 && workspaceSearchHits.documents.length === 0 ? (
-                        <div className="slack-search-empty">No matches for that search.</div>
-                      ) : (
-                        <>
-                          {workspaceSearchHits.textMessages.length > 0 ? (
-                            <div className="slack-search-group">
-                              <div className="slack-search-group-label">Messages</div>
-                              <ul className="slack-search-hit-list">
-                                {workspaceSearchHits.textMessages.map((m) => (
-                                  <li key={m.id}>
-                                    <button
-                                      type="button"
-                                      className="slack-search-hit"
-                                      onClick={() => openSearchResultMessage(m.id)}
-                                    >
-                                      <span className="slack-search-hit-meta">
-                                        {m.author_name} · {formatMsgTime(m.created_at)}
-                                      </span>
-                                      <span className="slack-search-hit-snippet">
-                                        {String(m.body || '').slice(0, 100)}
-                                        {String(m.body || '').length > 100 ? '…' : ''}
-                                      </span>
-                                    </button>
-                                  </li>
-                                ))}
-                              </ul>
-                            </div>
-                          ) : null}
-                          {workspaceSearchHits.documents.length > 0 ? (
-                            <div className="slack-search-group">
-                              <div className="slack-search-group-label">Documents & files</div>
-                              <ul className="slack-search-hit-list">
-                                {workspaceSearchHits.documents.map((m) => (
-                                  <li key={m.id}>
-                                    <button
-                                      type="button"
-                                      className="slack-search-hit"
-                                      onClick={() => openSearchResultDoc(m.id)}
-                                    >
-                                      <span className="slack-search-hit-meta">File · {formatMsgTime(m.created_at)}</span>
-                                      <span className="slack-search-hit-snippet">{m.attachment_original || 'Attachment'}</span>
-                                    </button>
-                                  </li>
-                                ))}
-                              </ul>
-                            </div>
-                          ) : null}
-                        </>
-                      )}
-                    </div>
-                  ) : null}
-                </div>
-                <div className="slack-topbar-end">
-                  <button type="button" className="slack-topbar-icon-btn" aria-label="History" title="History">
-                    <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden>
-                      <path
-                        fill="currentColor"
-                        d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"
+                      <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden>
+                        <path
+                          fill="currentColor"
+                          d="M10 2a8 8 0 105.293 14.707l4.387 4.387 1.414-1.414-4.387-4.387A8 8 0 0010 2zm0 2a6 6 0 110 12 6 6 0 010-12z"
+                        />
+                      </svg>
+                    </button>
+                  </>
+                ) : (
+                  <div className="slack-topbar-search-outer slack-topbar-search-outer--expanded">
+                    <div className="slack-topbar-search-wrap">
+                      <svg className="slack-topbar-search-svg" width="18" height="18" viewBox="0 0 24 24" aria-hidden>
+                        <path
+                          fill="currentColor"
+                          d="M10 2a8 8 0 105.293 14.707l4.387 4.387 1.414-1.414-4.387-4.387A8 8 0 0010 2zm0 2a6 6 0 110 12 6 6 0 010-12z"
+                        />
+                      </svg>
+                      <input
+                        ref={topSearchInputRef}
+                        type="search"
+                        className="slack-topbar-search"
+                        placeholder={`Search in #${roomName || 'channel'}…`}
+                        value={workspaceSearchQuery}
+                        onChange={(e) => {
+                          setWorkspaceSearchQuery(e.target.value)
+                          setWorkspaceSearchOpen(true)
+                        }}
+                        onFocus={() => {
+                          window.clearTimeout(searchBlurTimerRef.current)
+                          setWorkspaceSearchOpen(true)
+                        }}
+                        onBlur={() => {
+                          searchBlurTimerRef.current = window.setTimeout(() => setWorkspaceSearchOpen(false), 220)
+                        }}
+                        aria-label="Search messages and files in this channel"
+                        autoComplete="off"
                       />
-                    </svg>
-                  </button>
+                      <button
+                        type="button"
+                        className="slack-topbar-search-dismiss"
+                        aria-label="Close search"
+                        onClick={() => {
+                          setTopChannelSearchOpen(false)
+                          setWorkspaceSearchQuery('')
+                          setWorkspaceSearchOpen(false)
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                    {workspaceSearchOpen && workspaceSearchQuery.trim().length >= 2 ? (
+                      <div
+                        className="slack-search-dropdown"
+                        role="listbox"
+                        aria-label="Search results"
+                        onMouseDown={(e) => e.preventDefault()}
+                      >
+                        {workspaceSearchHits.textMessages.length === 0 && workspaceSearchHits.documents.length === 0 ? (
+                          <div className="slack-search-empty">No matches for that search.</div>
+                        ) : (
+                          <>
+                            {workspaceSearchHits.textMessages.length > 0 ? (
+                              <div className="slack-search-group">
+                                <div className="slack-search-group-label">Messages</div>
+                                <ul className="slack-search-hit-list">
+                                  {workspaceSearchHits.textMessages.map((m) => (
+                                    <li key={m.id}>
+                                      <button
+                                        type="button"
+                                        className="slack-search-hit"
+                                        onClick={() => openSearchResultMessage(m.id)}
+                                      >
+                                        <span className="slack-search-hit-meta">
+                                          {m.author_name} · {formatMsgTime(m.created_at)}
+                                        </span>
+                                        <span className="slack-search-hit-snippet">
+                                          {String(m.body || '').slice(0, 100)}
+                                          {String(m.body || '').length > 100 ? '…' : ''}
+                                        </span>
+                                      </button>
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            ) : null}
+                            {workspaceSearchHits.documents.length > 0 ? (
+                              <div className="slack-search-group">
+                                <div className="slack-search-group-label">Files</div>
+                                <ul className="slack-search-hit-list">
+                                  {workspaceSearchHits.documents.map((m) => (
+                                    <li key={m.id}>
+                                      <button
+                                        type="button"
+                                        className="slack-search-hit"
+                                        onClick={() => openSearchResultDoc(m.id)}
+                                      >
+                                        <span className="slack-search-hit-meta">File · {formatMsgTime(m.created_at)}</span>
+                                        <span className="slack-search-hit-snippet">{m.attachment_original || 'Attachment'}</span>
+                                      </button>
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            ) : null}
+                          </>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+                )}
+                <div className="slack-topbar-end">
                   <div className="slack-topbar-avatar" title={identity.name}>
                     {memberInitials(identity.name, identity.email)}
                   </div>
@@ -854,107 +1169,53 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                 </div>
               </header>
 
-              <div className="slack-body-row">
-                <nav className="slack-activity-bar" aria-label="Workspace switcher">
-                  <button
-                    type="button"
-                    className={`slack-act-btn${mainTab !== 'activity' && mainTab !== 'files' ? ' is-active' : ''}`}
-                    title="Home"
-                    aria-label="Home"
-                    aria-current={mainTab !== 'activity' && mainTab !== 'files' ? 'page' : undefined}
-                    onClick={() => {
-                      setDmPeer(null)
-                      setMainTab('messages')
-                    }}
-                  >
+              <div className="slack-body-row slack-body-row--studio">
+                <button
+                  type="button"
+                  className={`slack-sidebar-backdrop${mobileSidebarOpen ? ' is-visible' : ''}`}
+                  aria-label="Close channels menu"
+                  tabIndex={mobileSidebarOpen ? 0 : -1}
+                  onClick={() => setMobileSidebarOpen(false)}
+                />
+                <nav className="slack-icon-rail" aria-label="workSphere chat apps">
+                  <Link className="slack-icon-rail-link" to="/" title="Home">
                     <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden>
                       <path
                         fill="currentColor"
                         d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8h5z"
                       />
                     </svg>
-                  </button>
-                  <button
-                    type="button"
-                    className={`slack-act-btn${dmPeer && mainTab === 'messages' ? ' is-active' : ''}`}
-                    title="Direct messages"
-                    aria-label="Direct messages"
-                    onClick={() => {
-                      setMainTab('messages')
-                      queueMicrotask(() => dmSectionRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }))
-                    }}
-                  >
+                  </Link>
+                  <span className="slack-icon-rail-item is-active" title="Chats">
                     <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden>
                       <path
                         fill="currentColor"
                         d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"
                       />
                     </svg>
-                  </button>
-                  <button
-                    type="button"
-                    className={`slack-act-btn${mainTab === 'activity' ? ' is-active' : ''}`}
-                    title="Activity & invite"
-                    aria-label="Activity and channel invite link"
-                    onClick={() => {
-                      if (roomId) {
-                        setDmPeer(null)
-                        setMainTab('activity')
-                      }
-                    }}
-                  >
+                  </span>
+                  <Link className="slack-icon-rail-link" to="/teams/meet" title="Meet">
                     <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden>
                       <path
                         fill="currentColor"
-                        d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"
+                        d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"
                       />
                     </svg>
-                  </button>
-                  <button
-                    type="button"
-                    className={`slack-act-btn${mainTab === 'files' ? ' is-active' : ''}`}
-                    title="Files"
-                    aria-label="Files"
-                    onClick={() => {
-                      if (roomId) {
-                        setDmPeer(null)
-                        setMainTab('files')
-                      }
-                    }}
-                  >
+                  </Link>
+                  <Link className="slack-icon-rail-link" to="/features" title="Features">
                     <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden>
                       <path
                         fill="currentColor"
-                        d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"
+                        d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"
                       />
                     </svg>
-                  </button>
-                  <button type="button" className="slack-act-btn" title="More" aria-label="More">
-                    <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden>
-                      <path fill="currentColor" d="M6 10c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm12 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm-6 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z" />
-                    </svg>
-                  </button>
-                  <div className="slack-act-spacer" />
-                  <button type="button" className="slack-act-btn slack-act-add" title="Add" aria-label="Add">
-                    +
-                  </button>
+                  </Link>
                 </nav>
-
-                <aside className="slack-sidebar-panel">
+                <aside className={`slack-sidebar-panel${mobileSidebarOpen ? ' is-open' : ''}`}>
                   <div className="slack-ws-header">
-                    <button type="button" className="slack-ws-name-btn">
+                    <div className="slack-ws-brand">
+                      <img src={workSphereLogo} alt="" className="slack-ws-logo" width={32} height={32} />
                       <span className="slack-ws-name">{WORKSPACE_NAME}</span>
-                      <span className="slack-ws-chev" aria-hidden>
-                        ▾
-                      </span>
-                    </button>
-                    <div className="slack-ws-header-actions">
-                      <button type="button" className="slack-ws-icon-btn" aria-label="Workspace menu" title="Menu">
-                        ⚙
-                      </button>
-                      <button type="button" className="slack-ws-icon-btn" aria-label="New message" title="New message">
-                        ✎
-                      </button>
                     </div>
                   </div>
 
@@ -962,7 +1223,7 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                     <input
                       type="text"
                       className="slack-jump-input"
-                      placeholder="Jump to a channel…"
+                      placeholder="Find a channel…"
                       value={jumpToQuery}
                       onChange={(e) => setJumpToQuery(e.target.value)}
                       aria-label="Filter channels"
@@ -970,40 +1231,27 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                     />
                   </div>
 
-                  <div className="slack-sidebar-links">
-                    <button type="button" className="slack-side-link">
-                      Threads
-                    </button>
-                    <button type="button" className="slack-side-link">
-                      Huddles
-                    </button>
-                    <button type="button" className="slack-side-link">
-                      Directories
-                    </button>
-                  </div>
-
                   <div className="slack-side-scroll">
                     <div className="slack-side-section">
-                      <button type="button" className="slack-side-section-head">
-                        ⭐ Starred
-                      </button>
-                      <div className="slack-side-section-body slack-side-muted">Star important channels to pin them here.</div>
-                    </div>
-
-                    <div className="slack-side-section">
                       <div className="slack-side-section-head slack-side-section-head--row">
-                        <button type="button" className="slack-side-section-toggle">
-                          ▾ Channels
+                        <button
+                          type="button"
+                          className="slack-side-section-toggle"
+                          aria-expanded={channelsOpen}
+                          onClick={() => setChannelsOpen((o) => !o)}
+                        >
+                          {channelsOpen ? '▾' : '▸'} Channels
                         </button>
                         <button
                           type="button"
                           className="slack-side-add"
-                          onClick={() => setShowCreate(true)}
+                          onClick={openCreateModal}
                           aria-label="Create channel"
                         >
                           +
                         </button>
                       </div>
+                      {channelsOpen ? (
                       <ul className="slack-channel-list">
                         {rooms.length === 0 ? (
                           <li className="slack-side-muted slack-channel-empty">No channels yet</li>
@@ -1015,10 +1263,7 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                               <button
                                 type="button"
                                 className={`slack-channel-row${r.id === roomId ? ' is-active' : ''}`}
-                                onClick={() => {
-                                  setDmPeer(null)
-                                  setRoomId(r.id)
-                                }}
+                                onClick={() => selectChannel(r.id)}
                               >
                                 <span className="slack-channel-hash">#</span>
                                 <span className="slack-channel-label">{r.name}</span>
@@ -1027,17 +1272,22 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                           ))
                         )}
                       </ul>
+                      ) : null}
                     </div>
 
-                    <div className="slack-side-section" ref={dmSectionRef}>
-                      <button type="button" className="slack-side-section-head slack-side-section-toggle">
-                        ▾ Direct messages
+                    <div className="slack-side-section">
+                      <button
+                        type="button"
+                        className="slack-side-section-head slack-side-section-toggle"
+                        aria-expanded={dmsOpen}
+                        onClick={() => setDmsOpen((o) => !o)}
+                      >
+                        {dmsOpen ? '▾' : '▸'} Teammates
                       </button>
+                      {dmsOpen ? (
                       <ul className="slack-dm-list">
                         {dmMembers.length === 0 ? (
-                          <li className="slack-side-muted">
-                            You’re the only member — invite others to this channel to message them here.
-                          </li>
+                          <li className="slack-side-muted">Invite teammates from the Invite tab to chat with them.</li>
                         ) : (
                           dmMembers.map((m) => (
                             <li key={m.email}>
@@ -1049,6 +1299,8 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                                   setMainTab('messages')
                                   setWorkspaceSearchQuery('')
                                   setWorkspaceSearchOpen(false)
+                                  setTopChannelSearchOpen(false)
+                                  setMobileSidebarOpen(false)
                                 }}
                               >
                                 <span className="slack-dm-avatar">{memberInitials(m.name, m.email)}</span>
@@ -1058,13 +1310,7 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                           ))
                         )}
                       </ul>
-                    </div>
-
-                    <div className="slack-side-section">
-                      <button type="button" className="slack-side-section-head slack-side-section-toggle">
-                        ▾ Apps
-                      </button>
-                      <p className="slack-side-muted slack-apps-hint">Add tools from the directory (preview)</p>
+                      ) : null}
                     </div>
                   </div>
 
@@ -1093,9 +1339,10 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                           setWorkspaceSearchQuery('')
                           setWorkspaceSearchOpen(false)
                           setJumpToQuery('')
+                          setTopChannelSearchOpen(false)
                         }}
                       >
-                        Switch account
+                        Use different account
                       </button>
                     ) : null}
                   </div>
@@ -1112,10 +1359,14 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                           Welcome to your workspace
                         </h2>
                         <p className="slack-blank-desc">
-                          Create channels for each project or team. Up to {MAX_MEMBERS} people per channel—switch anytime
+                          Create channels for each project or team. Up to {MEMBER_LIMIT_CAP} people per channel—switch anytime
                           from the sidebar.
                         </p>
-                        <button type="button" className="slack-btn slack-btn-primary slack-blank-cta" onClick={() => setShowCreate(true)}>
+                        <button
+                          type="button"
+                          className="slack-btn slack-btn-primary slack-blank-cta"
+                          onClick={openCreateModal}
+                        >
                           Create a channel
                         </button>
                       </div>
@@ -1130,7 +1381,11 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                           Select a channel
                         </h2>
                         <p className="slack-blank-desc">Pick a channel under Channels in the sidebar, or create a new one.</p>
-                        <button type="button" className="slack-btn slack-btn-primary slack-blank-cta" onClick={() => setShowCreate(true)}>
+                        <button
+                          type="button"
+                          className="slack-btn slack-btn-primary slack-blank-cta"
+                          onClick={openCreateModal}
+                        >
                           Create channel
                         </button>
                       </div>
@@ -1177,8 +1432,8 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                               </>
                             ) : (
                               <>
-                                {memberCount} member{memberCount === 1 ? '' : 's'} · Team conversation · max {MAX_MEMBERS}{' '}
-                                people
+                                {memberCount} member{memberCount === 1 ? '' : 's'}
+                                {memberCount < roomMemberLimit ? ` · up to ${roomMemberLimit} people` : ''}
                               </>
                             )}
                           </p>
@@ -1192,27 +1447,18 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                             ))}
                           </div>
                           <span className="slack-header-count">{memberCount}</span>
-                          <button type="button" className="slack-header-tool" aria-label="Notifications" title="Notifications">
-                            <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden>
-                              <path
-                                fill="currentColor"
-                                d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"
-                              />
-                            </svg>
-                          </button>
-                          <button type="button" className="slack-header-tool" aria-label="Search in channel" title="Search">
-                            <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden>
-                              <path
-                                fill="currentColor"
-                                d="M10 2a8 8 0 105.293 14.707l4.387 4.387 1.414-1.414-4.387-4.387A8 8 0 0010 2zm0 2a6 6 0 110 12 6 6 0 010-12z"
-                              />
-                            </svg>
+                          <button
+                            type="button"
+                            className="slack-header-invite-btn"
+                            onClick={() => setMainTab('activity')}
+                          >
+                            Invite
                           </button>
                           <button
                             type="button"
                             className={`slack-header-tool${detailsOpen ? ' is-active' : ''}`}
-                            aria-label="Channel details"
-                            title="Details"
+                            aria-label="More options"
+                            title="More options"
                             onClick={() => setDetailsOpen((o) => !o)}
                           >
                             <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden>
@@ -1225,7 +1471,7 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                         </div>
                       </header>
 
-                      <div className="slack-channel-tabs" role="tablist" aria-label="Channel views">
+                      <div className="slack-channel-tabs" role="tablist" aria-label="Channel">
                         <button
                           type="button"
                           role="tab"
@@ -1233,7 +1479,7 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                           className={`slack-tab${mainTab === 'messages' ? ' is-active' : ''}`}
                           onClick={() => setMainTab('messages')}
                         >
-                          Messages
+                          Chat
                         </button>
                         <button
                           type="button"
@@ -1242,16 +1488,7 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                           className={`slack-tab${mainTab === 'activity' ? ' is-active' : ''}`}
                           onClick={() => setMainTab('activity')}
                         >
-                          Activity
-                        </button>
-                        <button
-                          type="button"
-                          role="tab"
-                          aria-selected={mainTab === 'canvas'}
-                          className={`slack-tab${mainTab === 'canvas' ? ' is-active' : ''}`}
-                          onClick={() => setMainTab('canvas')}
-                        >
-                          Canvas
+                          Invite
                         </button>
                         <button
                           type="button"
@@ -1297,30 +1534,115 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                                     </div>
                                     {g.rows.map((m) => {
                                       const outgoing = messageIsMine(m.author_email)
+                                      const deleted = messageIsDeleted(m)
+                                      const edited = messageWasEdited(m)
+                                      const showEdit = identity && canEditMessage(m, identity.email)
+                                      const showDelete = identity && canDeleteMessage(m, identity.email)
+                                      const isEditing = editingMessageId === m.id
                                       const fileHref =
-                                        m.attachment_stored && identity
+                                        !deleted && m.attachment_stored && identity
                                           ? `/api/collab/rooms/${roomId}/messages/${m.id}/file?email=${encodeURIComponent(identity.email)}`
                                           : null
                                       const isImage = Boolean(m.attachment_mime?.startsWith('image/'))
+                                      const menuOpen = openMessageMenuId === m.id
+                                      const showMsgMenu = (showEdit || showDelete) && !deleted && !isEditing
                                       return (
                                         <div
                                           key={m.id}
                                           data-slack-msg-id={m.id}
-                                          className={`slack-thread-msg${outgoing ? ' slack-thread-msg--self' : ''}`}
+                                          className={`slack-thread-msg${outgoing ? ' slack-thread-msg--self' : ''}${deleted ? ' slack-thread-msg--deleted' : ''}`}
                                         >
+                                          {deleted ? (
+                                            <p className="slack-thread-deleted">This message was deleted</p>
+                                          ) : (
+                                            <>
                                           {fileHref ? (
                                             <div className="slack-msg-attachment">
                                               {isImage ? (
-                                                <a href={fileHref} target="_blank" rel="noreferrer" className="slack-msg-img-wrap">
-                                                  <img src={fileHref} alt={m.attachment_original || 'Attachment'} className="slack-msg-img" />
-                                                </a>
+                                                <CollabInlineImage
+                                                  href={fileHref}
+                                                  alt={m.attachment_original || 'Attachment'}
+                                                  imgClass="slack-msg-img"
+                                                />
                                               ) : null}
                                               <a className="slack-msg-file-link" href={fileHref} target="_blank" rel="noreferrer">
                                                 📎 {m.attachment_original || 'Download file'}
                                               </a>
                                             </div>
                                           ) : null}
-                                          {m.body ? <div className="slack-thread-text">{m.body}</div> : null}
+                                          {isEditing ? (
+                                            <div className="slack-msg-edit">
+                                              <textarea
+                                                className="slack-msg-edit-input"
+                                                rows={3}
+                                                value={editDraft}
+                                                onChange={(e) => setEditDraft(e.target.value)}
+                                                disabled={messageActionBusy}
+                                                aria-label="Edit message"
+                                              />
+                                              <div className="slack-msg-edit-actions">
+                                                <button type="button" className="slack-msg-action-btn" disabled={messageActionBusy} onClick={() => void saveEditMessage()}>Save</button>
+                                                <button type="button" className="slack-msg-action-btn slack-msg-action-btn--ghost" disabled={messageActionBusy} onClick={cancelEditMessage}>Cancel</button>
+                                              </div>
+                                            </div>
+                                          ) : m.body ? (
+                                            <div className="slack-thread-text">
+                                              {m.body}
+                                              {edited ? <span className="slack-msg-edited"> (edited)</span> : null}
+                                            </div>
+                                          ) : null}
+                                          {showMsgMenu ? (
+                                            <div
+                                              className={`slack-msg-menu-wrap${menuOpen ? ' is-open' : ''}`}
+                                            >
+                                              <button
+                                                type="button"
+                                                className="slack-msg-menu-trigger"
+                                                aria-label="Message options"
+                                                aria-expanded={menuOpen}
+                                                aria-haspopup="menu"
+                                                disabled={messageActionBusy}
+                                                onClick={(e) => {
+                                                  e.stopPropagation()
+                                                  setOpenMessageMenuId((id) => (id === m.id ? null : m.id))
+                                                }}
+                                              >
+                                                <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
+                                                  <circle cx="8" cy="3" r="1.5" fill="currentColor" />
+                                                  <circle cx="8" cy="8" r="1.5" fill="currentColor" />
+                                                  <circle cx="8" cy="13" r="1.5" fill="currentColor" />
+                                                </svg>
+                                              </button>
+                                              {menuOpen ? (
+                                                <div className="slack-msg-menu" role="menu">
+                                                  {showEdit ? (
+                                                    <button
+                                                      type="button"
+                                                      className="slack-msg-menu-item"
+                                                      role="menuitem"
+                                                      disabled={messageActionBusy}
+                                                      onClick={() => startEditMessage(m)}
+                                                    >
+                                                      Edit message
+                                                    </button>
+                                                  ) : null}
+                                                  {showDelete ? (
+                                                    <button
+                                                      type="button"
+                                                      className="slack-msg-menu-item slack-msg-menu-item--danger"
+                                                      role="menuitem"
+                                                      disabled={messageActionBusy}
+                                                      onClick={() => void deleteMessage(m)}
+                                                    >
+                                                      Delete message
+                                                    </button>
+                                                  ) : null}
+                                                </div>
+                                              ) : null}
+                                            </div>
+                                          ) : null}
+                                            </>
+                                          )}
                                         </div>
                                       )
                                     })}
@@ -1330,18 +1652,71 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                             )}
                           </div>
 
+                          {pendingTaskShare && roomId && canPost ? (
+                            <div className="slack-wb-share slack-wb-share--task" role="status">
+                              <div
+                                className={`slack-task-share-badge slack-task-share-badge--${pendingTaskShare.priority || 'med'}`}
+                                aria-hidden
+                              >
+                                📋
+                              </div>
+                              <div className="slack-wb-share-text">
+                                <strong>Share task in #{roomName || 'this channel'}?</strong>
+                                <span>{pendingTaskShare.title}</span>
+                              </div>
+                              <div className="slack-wb-share-actions">
+                                <button
+                                  type="button"
+                                  className="slack-wb-share-discard"
+                                  onClick={discardPendingTaskShare}
+                                  disabled={pendingTaskShareBusy}
+                                >
+                                  Discard
+                                </button>
+                                <button
+                                  type="button"
+                                  className="slack-wb-share-send"
+                                  onClick={() => void sendPendingTaskToRoom()}
+                                  disabled={pendingTaskShareBusy}
+                                >
+                                  {pendingTaskShareBusy ? 'Sending…' : 'Share task'}
+                                </button>
+                              </div>
+                            </div>
+                          ) : null}
+
+                          {pendingShare && roomId && canPost ? (
+                            <div className="slack-wb-share" role="status">
+                              <div className="slack-wb-share-thumb">
+                                <img src={pendingShare.dataUrl} alt={pendingShare.name || 'Whiteboard drawing'} />
+                              </div>
+                              <div className="slack-wb-share-text">
+                                <strong>Send whiteboard drawing to #{roomName || 'this channel'}?</strong>
+                                <span>{pendingShare.name || 'Untitled drawing'}</span>
+                              </div>
+                              <div className="slack-wb-share-actions">
+                                <button
+                                  type="button"
+                                  className="slack-wb-share-discard"
+                                  onClick={discardPendingShare}
+                                  disabled={pendingShareBusy}
+                                >
+                                  Discard
+                                </button>
+                                <button
+                                  type="button"
+                                  className="slack-wb-share-send"
+                                  onClick={() => void sendPendingShareToRoom()}
+                                  disabled={pendingShareBusy}
+                                >
+                                  {pendingShareBusy ? 'Sending…' : 'Send drawing'}
+                                </button>
+                              </div>
+                            </div>
+                          ) : null}
+
                           {canPost ? (
                             <div className="slack-composer-slack">
-                              <div className="slack-composer-toolbar" aria-hidden="true">
-                                <span className="slack-fmt-btn">B</span>
-                                <span className="slack-fmt-btn">I</span>
-                                <span className="slack-fmt-btn">U̲</span>
-                                <span className="slack-fmt-btn slack-fmt-sep">Link</span>
-                                <span className="slack-fmt-btn">≡</span>
-                                <span className="slack-fmt-btn">•</span>
-                                <span className="slack-fmt-btn">123</span>
-                                <span className="slack-fmt-btn">&lt;/&gt;</span>
-                              </div>
                               <form className="slack-composer-inner" onSubmit={sendMessage}>
                                 <input
                                   ref={fileInputRef}
@@ -1384,7 +1759,11 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                                   }}
                                   aria-label="Message"
                                 />
-                                <button className="slack-send-slack" type="submit" aria-label="Send">
+                                <button
+                                  className="slack-send-slack"
+                                  type="submit"
+                                  aria-label="Send"
+                                >
                                   <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden>
                                     <path fill="currentColor" d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
                                   </svg>
@@ -1393,7 +1772,7 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                             </div>
                           ) : (
                             <div className="slack-composer-restricted">
-                              Only certain people can post when the channel is full ({MAX_MEMBERS} members). Share an invite
+                              Only certain people can post when the channel is full ({roomMemberLimit} members). Share an invite
                               from channel details to add teammates in a new channel.
                             </div>
                           )}
@@ -1404,16 +1783,23 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                         <div className="slack-activity-pane">
                           <section className="slack-activity-section" aria-labelledby="slack-activity-invite-heading">
                             <h3 id="slack-activity-invite-heading" className="slack-activity-section-title">
-                              Channel invite link
+                              Invite link
                             </h3>
                             <p className="slack-activity-section-desc">
-                              Share this link so others can join <strong>#{roomName}</strong> (until the channel reaches{' '}
-                              {MAX_MEMBERS} people).
+                              Copy this link and send it to teammates. They can join <strong>#{roomName}</strong> with one
+                              click.
                             </p>
-                            {showPhoneInviteHint ? (
+                            {resolvedOrigin.source === 'lan' ? (
+                              <p className="slack-invite-hint slack-invite-hint--ok" role="note">
+                                This invite uses your PC’s Wi‑Fi address so teammates on the same network can open it on a
+                                phone.
+                              </p>
+                            ) : null}
+                            {showLocalhostInviteHint ? (
                               <p className="slack-invite-hint slack-invite-hint--warn" role="note">
-                                <strong>Phone or another device?</strong> Set <code>VITE_PUBLIC_APP_URL</code> to your LAN
-                                URL and copy the link again so it opens on that device.
+                                <strong>Still on localhost?</strong> Set <code>VITE_WORKSPHERE_PUBLIC_URL</code> to your
+                                deployed domain (e.g. <code>https://app.worksphere.com</code>) for links that work
+                                everywhere.
                               </p>
                             ) : null}
                             <div className="slack-invite-row slack-invite-row--activity">
@@ -1426,47 +1812,6 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                               Email invites & more in channel details →
                             </button>
                           </section>
-                          <section className="slack-activity-section" aria-labelledby="slack-activity-feed-heading">
-                            <h3 id="slack-activity-feed-heading" className="slack-activity-section-title">
-                              Recent messages
-                            </h3>
-                            {activityFeedNewestFirst.length === 0 ? (
-                              <p className="slack-activity-empty">No messages yet. Switch to the Messages tab to start the thread.</p>
-                            ) : (
-                              <ul className="slack-activity-feed-list">
-                                {activityFeedNewestFirst.map((m) => {
-                                  const snippet = [m.body, m.attachment_original].filter(Boolean).join(' · ').trim()
-                                  const short = snippet.length > 140 ? `${snippet.slice(0, 137)}…` : snippet || '(attachment)'
-                                  return (
-                                    <li key={m.id} className="slack-activity-feed-item">
-                                      <time className="slack-activity-feed-time" dateTime={new Date(m.created_at).toISOString()}>
-                                        {formatMsgTime(m.created_at)}
-                                      </time>
-                                      <div className="slack-activity-feed-body">
-                                        <span className="slack-activity-feed-author">{m.author_name}</span>
-                                        <span className="slack-activity-feed-snippet">{short}</span>
-                                      </div>
-                                    </li>
-                                  )
-                                })}
-                              </ul>
-                            )}
-                          </section>
-                        </div>
-                      ) : null}
-
-                      {mainTab === 'canvas' ? (
-                        <div className="slack-canvas-pane">
-                          <div className="slack-canvas-card">
-                            <h3 className="slack-canvas-title">Canvas</h3>
-                            <p className="slack-canvas-desc">
-                              Link a shared doc to this channel. In workSphere this is a preview—use Messages and Files for
-                              live collaboration today.
-                            </p>
-                            <button type="button" className="slack-btn slack-btn-secondary" disabled>
-                              Create canvas (coming soon)
-                            </button>
-                          </div>
                         </div>
                       ) : null}
 
@@ -1504,6 +1849,7 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
                     </div>
                   )}
                 </div>
+
               </div>
             </div>
 
@@ -1525,28 +1871,78 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
             )}
 
             {showCreate ? (
-              <div className="slack-modal" role="presentation">
+              <div className="slack-modal" role="dialog" aria-labelledby="slack-create-title" aria-modal="true">
+                <button
+                  type="button"
+                  className="slack-modal-backdrop"
+                  aria-label="Close"
+                  onClick={() => {
+                    setShowCreate(false)
+                    setCreateError(null)
+                    setNewRoomMemberLimit(MEMBER_LIMIT_CAP)
+                  }}
+                />
                 <div className="slack-modal-card">
-                  <h3 className="slack-modal-title">Create a channel</h3>
-                  <p className="slack-modal-desc">
-                    Channels are where your team discusses a topic. Each has its own members, messages, and invite link (max{' '}
-                    {MAX_MEMBERS} people).
-                  </p>
+                  <h3 id="slack-create-title" className="slack-modal-title">
+                    New channel
+                  </h3>
+                  <p className="slack-modal-desc">Give your team a clear name (e.g. general or project-alpha).</p>
                   <form onSubmit={createRoom}>
+                    <label className="slack-label slack-modal-label" htmlFor="slack-new-channel-name">
+                      Channel name
+                    </label>
                     <input
-                      className="slack-input"
+                      id="slack-new-channel-name"
+                      className="slack-input slack-modal-input"
                       value={newRoomName}
-                      onChange={(e) => setNewRoomName(e.target.value)}
-                      placeholder="e.g. general, sprint-42"
+                      onChange={(e) => {
+                        setNewRoomName(e.target.value)
+                        if (createError) setCreateError(null)
+                      }}
+                      placeholder="general"
                       required
                       autoFocus
+                      disabled={createBusy}
                     />
+                    <label className="slack-label slack-modal-label" htmlFor="slack-new-channel-limit">
+                      Member limit
+                    </label>
+                    <input
+                      id="slack-new-channel-limit"
+                      className="slack-input slack-modal-input"
+                      type="number"
+                      min={MEMBER_LIMIT_MIN}
+                      max={MEMBER_LIMIT_CAP}
+                      step={1}
+                      value={newRoomMemberLimit}
+                      onChange={(e) => {
+                        const n = e.target.valueAsNumber
+                        if (Number.isNaN(n)) return
+                        setNewRoomMemberLimit(Math.min(MEMBER_LIMIT_CAP, Math.max(MEMBER_LIMIT_MIN, Math.round(n))))
+                        if (createError) setCreateError(null)
+                      }}
+                      aria-describedby="slack-new-channel-limit-hint"
+                      disabled={createBusy}
+                    />
+                    <p id="slack-new-channel-limit-hint" className="slack-modal-hint">
+                      Max people who can join this channel ({MEMBER_LIMIT_MIN}–{MEMBER_LIMIT_CAP}). Invites stop when the channel is full.
+                    </p>
+                    {createError ? <div className="slack-modal-error">{createError}</div> : null}
                     <div className="slack-modal-actions">
-                      <button type="button" className="slack-btn slack-btn-ghost" onClick={() => setShowCreate(false)}>
+                      <button
+                        type="button"
+                        className="slack-btn slack-btn-ghost"
+                        disabled={createBusy}
+                        onClick={() => {
+                          setShowCreate(false)
+                          setCreateError(null)
+                          setNewRoomMemberLimit(MEMBER_LIMIT_CAP)
+                        }}
+                      >
                         Cancel
                       </button>
-                      <button type="submit" className="slack-btn slack-btn-primary">
-                        Create channel
+                      <button type="submit" className="slack-btn slack-btn-primary" disabled={createBusy}>
+                        {createBusy ? 'Creating…' : 'Create'}
                       </button>
                     </div>
                   </form>
@@ -1555,6 +1951,11 @@ export default function SlackCollaboration({ open, onClose, focusRoomId, onFocus
             ) : null}
           </>
         )}
+        {toast ? (
+          <div className="slack-toast" role="status" aria-live="polite">
+            {toast}
+          </div>
+        ) : null}
       </div>
     </div>
   )

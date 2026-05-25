@@ -7,8 +7,16 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+.env
+.env.local
+.env.*.local
+
 node_modules
 server/uploads
+server/worksphere.db
+server/worksphere.db-journal
+server/worksphere.db-shm
+server/worksphere.db-wal
 dist
 dist-ssr
 *.local
