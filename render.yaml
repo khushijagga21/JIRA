@@ -1,9 +1,9 @@
-# Render Blueprint — deploys the workSphere Express + WebSocket + SQLite API
-# 1. Push this file to your GitHub repo.
-# 2. Go to https://dashboard.render.com/blueprints → "New Blueprint Instance"
-# 3. Pick this repo. Render reads this file and provisions everything.
-# 4. After it's live, copy the URL (e.g. https://worksphere-api.onrender.com)
-#    and set VITE_API_URL on Vercel to that URL.
+# Render Blueprint — workSphere API (free tier)
+# Disks are NOT available on Render free — data lives in /tmp (resets on redeploy).
+# For persistent DB/uploads, upgrade to a paid Render plan and add a disk block back.
+#
+# Deploy: https://dashboard.render.com/blueprints → New Blueprint Instance → pick repo
+# Then set VITE_API_URL on Vercel to the Render service URL.
 services:
   - type: web
     name: worksphere-api
@@ -18,9 +18,9 @@ services:
       - key: NODE_VERSION
         value: "20"
       - key: WORKSPHERE_DATA_DIR
-        value: /var/data
+        value: /tmp/worksphere-data
       - key: OPENAI_API_KEY
-        sync: false # set this manually in the Render dashboard
+        sync: false
       - key: SMTP_HOST
         sync: false
       - key: SMTP_PORT
@@ -32,8 +32,4 @@ services:
       - key: SMTP_FROM
         sync: false
       - key: PUBLIC_APP_URL
-        sync: false # set this to your Vercel URL after first frontend deploy
-    disk:
-      name: worksphere-data
-      mountPath: /var/data
-      sizeGB: 1
+        sync: false

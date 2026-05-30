@@ -44,6 +44,8 @@ Your repo: `https://github.com/khushijagga21/JIRA`
 
 > **Free tier note:** Render's free web services go to sleep after ~15 minutes of inactivity. The first request after sleep takes ~30s to wake up; subsequent requests are instant.
 
+> **Free tier storage:** Persistent disks require a **paid** Render plan. The blueprint uses `/tmp/worksphere-data` instead (SQLite + uploads work, but **data resets when the service redeploys** or the instance is replaced). For production persistence, upgrade Render and add a disk — see `render.yaml` comments.
+
 ---
 
 ## 3. Deploy the frontend on Vercel
@@ -117,6 +119,9 @@ Render uses Node 20+ which already includes `node:sqlite` as a fallback. The ser
 
 **Meet doesn't connect (camera shows but no remote peer)**
 WebSocket isn't reaching the backend. Make sure the Render URL in `VITE_API_URL` uses `https://` (the client auto-upgrades to `wss://` for `/meet-ws`).
+
+**Blueprint error: "disks are not supported for free tier services"**
+Remove the `disk:` block from `render.yaml` (already fixed in the repo). Redeploy the blueprint. Free tier uses `/tmp/worksphere-data` instead — no persistent disk needed.
 
 **Uploads disappeared after redeploy**
 Confirm `WORKSPHERE_DATA_DIR=/var/data` is set in Render and that the **Disk** named `worksphere-data` is mounted at `/var/data`.

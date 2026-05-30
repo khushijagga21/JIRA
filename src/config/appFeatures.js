@@ -36,9 +36,9 @@ export const APP_FEATURES = [
     id: 'workspace',
     title: 'Coding workspace',
     navLabel: 'Coding workspace',
-    desc: 'Jump from team discussion into focused build context—linked issues, reviews, and tasks without losing the thread.',
+    desc: 'A full in-browser code editor inspired by VS Code—Monaco editor, file tree, tabs, run/preview, search, and command palette—so you can jump from team discussion to focused build without leaving workSphere.',
+    to: '/workspace',
     cardTone: 'workspace',
-    comingSoon: true,
     anchor: 'coding-workspace',
   },
 ]
@@ -53,6 +53,6 @@ export function buildNavFeatures({ onOpenSlack } = {}) {
     { label: 'workSphere teams', to: '/#teams' },
     { label: 'workSphere whiteboard', to: '/whiteboard' },
     { label: 'workSphere To-Do', to: '/todo' },
-    { label: 'Coding workspace', to: '/features#coding-workspace' },
+    { label: 'Coding workspace', to: '/workspace' },
   ]
 }

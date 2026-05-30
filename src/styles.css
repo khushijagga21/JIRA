@@ -2312,6 +2312,28 @@ html[data-theme="dark"] .everything-badge{
   font-weight:800;
 }
 .signup-success a{color:#0c66e4}
+.signup-info{
+  padding:10px 10px;
+  border-radius:8px;
+  background:#eff6ff;
+  border:1px solid rgba(59,130,246,.25);
+  color:#1e40af;
+  font-size:12px;
+  font-weight:700;
+}
+.login-retry{
+  display:inline;
+  padding:0;
+  margin:0;
+  border:0;
+  background:transparent;
+  color:#0c66e4;
+  font:inherit;
+  font-weight:800;
+  cursor:pointer;
+  text-decoration:underline;
+}
+.login-retry:hover{color:#0052cc}
 .signup-bottom{
   margin-top:12px;
   text-align:center;

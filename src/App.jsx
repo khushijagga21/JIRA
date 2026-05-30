@@ -25,7 +25,10 @@ import ProductTour from './components/ProductTour.jsx'
 import SlackCollaboration from './components/SlackCollaboration.jsx'
 import TeamsMeet from './components/TeamsMeet.jsx'
 import Todo from './pages/Todo.jsx'
+import CodingWorkspace from './pages/CodingWorkspace.jsx'
 import { buildNavFeatures } from './config/appFeatures.js'
+import { checkApiHealth } from './utils/apiFetch.js'
+import { isApiMisconfigured } from './utils/apiStatus.js'
 import {
   loadGallery as loadWhiteboardGallery,
   saveDrawing as saveWhiteboardDrawing,
@@ -1008,6 +1011,12 @@ function App() {
   const [slackOpen, setSlackOpen] = useState(false)
   const [slackFocusRoomId, setSlackFocusRoomId] = useState(null)
 
+  // Warm the API in the background (helps Render cold starts before login).
+  useEffect(() => {
+    if (isApiMisconfigured()) return
+    void checkApiHealth({ attempts: 2, delayMs: 1500 })
+  }, [])
+
   const startProductTour = useCallback(() => {
     function begin() {
       setTourEpoch((e) => e + 1)
@@ -1068,16 +1077,21 @@ function App() {
     if (changed) setSearchParams(next, { replace: true })
   }, [location.pathname, navigate, searchParams, setSearchParams])
 
+  const hideChrome = location.pathname.startsWith('/workspace')
+
   return (
     <>
       <a className="skip-link" href="#main">Skip to content</a>
-      <Navbar onProductGuide={startProductTour} onOpenSlack={() => setSlackOpen(true)} />
+      {hideChrome ? null : (
+        <Navbar onProductGuide={startProductTour} onOpenSlack={() => setSlackOpen(true)} />
+      )}
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/features" element={<AllFeatures />} />
         <Route path="/teams/meet" element={<TeamsMeet />} />
         <Route path="/whiteboard" element={<Whiteboard onOpenSlack={() => setSlackOpen(true)} />} />
         <Route path="/todo" element={<Todo onOpenSlack={() => setSlackOpen(true)} />} />
+        <Route path="/workspace" element={<CodingWorkspace />} />
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<Signup />} />
         <Route path="/join/:token" element={<JoinRoom />} />
@@ -1088,7 +1102,7 @@ function App() {
         active={tourActive}
         onClose={() => setTourActive(false)}
       />
-      <ChatbotWidget />
+      {hideChrome ? null : <ChatbotWidget />}
       <SlackCollaboration
         open={slackOpen}
         onClose={() => {

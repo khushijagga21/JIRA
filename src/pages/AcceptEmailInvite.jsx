@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { fetchApi } from '../utils/apiFetch.js'
 
 const IDENTITY_KEY = 'slack_collab_identity'
 
@@ -27,7 +28,7 @@ export default function AcceptEmailInvite() {
     if (!token) return
     try {
       setLoadError(null)
-      const res = await fetch(`/api/collab/email-invite/${encodeURIComponent(token)}`)
+      const res = await fetchApi(`/api/collab/email-invite/${encodeURIComponent(token)}`)
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
         setLoadError(
@@ -61,7 +62,7 @@ export default function AcceptEmailInvite() {
     setBusy(true)
     setActionError(null)
     try {
-      const res = await fetch(`/api/collab/email-invite/${encodeURIComponent(token)}/accept`, {
+      const res = await fetchApi(`/api/collab/email-invite/${encodeURIComponent(token)}/accept`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ displayName: name }),
@@ -90,7 +91,7 @@ export default function AcceptEmailInvite() {
     setBusy(true)
     setActionError(null)
     try {
-      const res = await fetch(`/api/collab/email-invite/${encodeURIComponent(token)}/decline`, {
+      const res = await fetchApi(`/api/collab/email-invite/${encodeURIComponent(token)}/decline`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),

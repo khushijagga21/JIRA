@@ -1,5 +1,8 @@
 import { useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import { fetchApi, parseApiJson } from '../utils/apiFetch.js'
+import { useApiReady } from '../utils/useApiReady.js'
+import AuthServiceBanner, { AuthServiceError } from '../components/AuthServiceBanner.jsx'
 import workSphereLogo from '../assets/worksphere-logo.png'
 
 function WorkSphereLogo() {
@@ -21,15 +24,19 @@ export default function Signup() {
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [status, setStatus] = useState('idle')
+  const [submitting, setSubmitting] = useState(false)
   const navigate = useNavigate()
+  const { state: apiState, recheck } = useApiReady()
 
   const canContinue = useMemo(
     () =>
       name.trim().length > 0 &&
       email.trim().length > 0 &&
       password.length >= MIN_PASSWORD_LEN &&
-      confirmPassword.length > 0,
-    [name, email, password, confirmPassword],
+      confirmPassword.length > 0 &&
+      apiState !== 'misconfigured' &&
+      !submitting,
+    [name, email, password, confirmPassword, apiState, submitting],
   )
 
   async function onSubmit(e) {
@@ -51,20 +58,42 @@ export default function Signup() {
       setStatus('mismatch')
       return
     }
+    if (apiState === 'misconfigured') {
+      setStatus('service')
+      return
+    }
+
+    setSubmitting(true)
+    setStatus('idle')
 
     try {
-      const r = await fetch('/api/signup', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
-      const data = await r.json().catch(() => ({}))
+      if (apiState !== 'ready') {
+        const ok = await recheck()
+        if (!ok) {
+          setStatus('service')
+          setSubmitting(false)
+          return
+        }
+      }
+
+      const r = await fetchApi(
+        '/api/signup',
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        },
+        { attempts: 3, delayMs: 2000 },
+      )
+      const data = await parseApiJson(r)
+
       if (!r.ok || !data.ok) {
         if (data.reason === 'exists') setStatus('exists')
         else if (data.reason === 'weak_password') setStatus('weak')
         else if (data.reason === 'missing_fields') setStatus('invalid')
         else if (data.reason === 'server_error') setStatus('server')
         else setStatus('server')
+        setSubmitting(false)
         return
       }
 
@@ -72,10 +101,18 @@ export default function Signup() {
       qs.set('registered', '1')
       qs.set('email', data.user.email)
       navigate(`/login?${qs.toString()}`, { replace: true })
-    } catch {
-      setStatus('network')
+    } catch (err) {
+      if (err?.code === 'api_not_configured' || err?.code === 'invalid_api_response') {
+        setStatus('service')
+      } else {
+        setStatus('network')
+      }
+    } finally {
+      setSubmitting(false)
     }
   }
+
+  const formDisabled = apiState === 'misconfigured'
 
   return (
     <main className="login">
@@ -90,6 +127,8 @@ export default function Signup() {
       <section className="login-card" aria-label="Sign up">
         <WorkSphereLogo />
         <h1 className="login-title">Sign up to continue</h1>
+
+        <AuthServiceBanner apiState={apiState} onRetry={() => void recheck()} />
 
         <form onSubmit={onSubmit} className="login-form">
           <label className="login-label">
@@ -106,6 +145,7 @@ export default function Signup() {
                 setStatus('idle')
               }}
               required
+              disabled={formDisabled}
             />
           </label>
 
@@ -123,6 +163,7 @@ export default function Signup() {
                 setStatus('idle')
               }}
               required
+              disabled={formDisabled}
             />
           </label>
 
@@ -141,6 +182,7 @@ export default function Signup() {
               }}
               required
               minLength={MIN_PASSWORD_LEN}
+              disabled={formDisabled}
             />
           </label>
 
@@ -158,6 +200,7 @@ export default function Signup() {
                 setStatus('idle')
               }}
               required
+              disabled={formDisabled}
             />
           </label>
 
@@ -197,22 +240,14 @@ export default function Signup() {
             </div>
           ) : null}
 
-          {status === 'server' ? (
-            <div className="signup-alert" role="alert">
-              Something went wrong on the server. Run <code className="login-code">npm run dev</code>{' '}
-              (API + Vite) and try again.
-            </div>
-          ) : null}
+          <AuthServiceError status={status} onRetry={() => void recheck()} />
 
-          {status === 'network' ? (
-            <div className="signup-alert" role="alert">
-              Cannot reach the API. Run <code className="login-code">npm run dev</code> — it starts the
-              server on port 8787 and Vite together.
-            </div>
-          ) : null}
-
-          <button className="login-continue" type="submit" disabled={!canContinue}>
-            Sign up
+          <button
+            className="login-continue"
+            type="submit"
+            disabled={!canContinue || apiState === 'checking'}
+          >
+            {submitting ? 'Creating account…' : apiState === 'checking' ? 'Connecting…' : 'Sign up'}
           </button>
         </form>
 

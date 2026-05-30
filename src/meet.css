@@ -1551,4 +1551,47 @@
   .meet-vtile--large{min-height:36vh}
   .meet-controls{padding:10px 12px max(10px, env(safe-area-inset-bottom))}
   .meet-ctl{padding:10px 14px; font-size:13px}
+  .meet-hero-grid,
+  .meet-lobby-grid{
+    grid-template-columns:1fr;
+    gap:20px;
+  }
+  .meet-hero-visual,
+  .meet-lobby-stage-card{
+    min-height:220px;
+  }
+}
+
+@media (max-width: 560px){
+  .meet-hero-title{font-size:clamp(24px, 7vw, 32px)}
+  .meet-hero-eyebrow{font-size:11px}
+  .meet-hero-strip{flex-direction:column; align-items:flex-start; gap:8px}
+  .meet-lobby-panel{padding:16px}
+  .meet-lobby-status-pill{font-size:11px}
+  .meet-room-top{
+    flex-wrap:wrap;
+    gap:8px;
+    padding:8px 10px;
+  }
+  .meet-room-title{font-size:14px}
+  .meet-controls{
+    gap:6px;
+    overflow-x:auto;
+    flex-wrap:nowrap;
+    -webkit-overflow-scrolling:touch;
+    scrollbar-width:none;
+  }
+  .meet-controls::-webkit-scrollbar{display:none}
+  .meet-ctl-round{
+    width:44px;
+    height:44px;
+    flex-shrink:0;
+  }
+  .meet-schedule-modal{
+    width:calc(100vw - 20px);
+    max-width:none;
+    margin:10px;
+    max-height:90dvh;
+    overflow-y:auto;
+  }
 }

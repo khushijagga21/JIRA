@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { setCurrentUser } from '../utils/auth.js'
+import { fetchApi, parseApiJson } from '../utils/apiFetch.js'
+import { useApiReady } from '../utils/useApiReady.js'
+import AuthServiceBanner, { AuthServiceError } from '../components/AuthServiceBanner.jsx'
 import workSphereLogo from '../assets/worksphere-logo.png'
 
 function WorkSphereLogo() {
@@ -19,11 +22,13 @@ export default function Login() {
   const [searchParams, setSearchParams] = useSearchParams()
   const justRegistered = searchParams.get('registered') === '1'
   const signupEmail = searchParams.get('email') ?? ''
+  const { state: apiState, recheck } = useApiReady()
 
   const [email, setEmail] = useState(signupEmail)
   const [password, setPassword] = useState('')
   const [remember, setRemember] = useState(false)
   const [status, setStatus] = useState('idle')
+  const [submitting, setSubmitting] = useState(false)
   const [showRegisteredBanner] = useState(justRegistered)
 
   useEffect(() => {
@@ -35,8 +40,12 @@ export default function Login() {
   }, [justRegistered, searchParams, setSearchParams])
 
   const canContinue = useMemo(
-    () => email.trim().length > 0 && password.length > 0,
-    [email, password],
+    () =>
+      email.trim().length > 0 &&
+      password.length > 0 &&
+      apiState !== 'misconfigured' &&
+      !submitting,
+    [email, password, apiState, submitting],
   )
 
   async function onSubmit(e) {
@@ -46,27 +55,55 @@ export default function Login() {
       setStatus('missing')
       return
     }
+    if (apiState === 'misconfigured') {
+      setStatus('service')
+      return
+    }
+
+    setSubmitting(true)
+    setStatus('idle')
 
     try {
-      const r = await fetch('/api/login', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ email: trimmedEmail, password }),
-      })
-      const data = await r.json().catch(() => ({}))
+      if (apiState !== 'ready') {
+        const ok = await recheck()
+        if (!ok) {
+          setStatus('service')
+          setSubmitting(false)
+          return
+        }
+      }
+
+      const r = await fetchApi(
+        '/api/login',
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ email: trimmedEmail, password }),
+        },
+        { attempts: 3, delayMs: 2000 },
+      )
+      const data = await parseApiJson(r)
+
       if (!r.ok || !data.ok) {
         if (data.reason === 'invalid_credentials') setStatus('invalid')
         else if (data.reason === 'password_not_set') setStatus('no_password')
         else if (data.reason === 'missing_fields') setStatus('missing')
         else setStatus('server')
+        setSubmitting(false)
         return
       }
 
       setCurrentUser(data.user, { remember })
       setStatus('idle')
       navigate('/')
-    } catch {
-      setStatus('network')
+    } catch (err) {
+      if (err?.code === 'api_not_configured' || err?.code === 'invalid_api_response') {
+        setStatus('service')
+      } else {
+        setStatus('network')
+      }
+    } finally {
+      setSubmitting(false)
     }
   }
 
@@ -83,6 +120,8 @@ export default function Login() {
       <section className="login-card" aria-label="Sign in">
         <WorkSphereLogo />
         <h1 className="login-title">Log in to continue</h1>
+
+        <AuthServiceBanner apiState={apiState} onRetry={() => void recheck()} />
 
         {showRegisteredBanner ? (
           <div className="signup-success" role="status">
@@ -105,6 +144,7 @@ export default function Login() {
                 setStatus('idle')
               }}
               required
+              disabled={apiState === 'misconfigured'}
             />
           </label>
 
@@ -122,6 +162,7 @@ export default function Login() {
                 setStatus('idle')
               }}
               required
+              disabled={apiState === 'misconfigured'}
             />
           </label>
 
@@ -130,6 +171,7 @@ export default function Login() {
               type="checkbox"
               checked={remember}
               onChange={(e) => setRemember(e.target.checked)}
+              disabled={apiState === 'misconfigured'}
             />
             Remember me <span className="login-info" aria-hidden="true">i</span>
           </label>
@@ -153,22 +195,14 @@ export default function Login() {
             </div>
           ) : null}
 
-          {status === 'server' ? (
-            <div className="signup-alert" role="alert">
-              Something went wrong on the server. Restart with <code className="login-code">npm run dev</code>{' '}
-              (starts the API and the site together) and try again.
-            </div>
-          ) : null}
+          <AuthServiceError status={status} onRetry={() => void recheck()} />
 
-          {status === 'network' ? (
-            <div className="signup-alert" role="alert">
-              Cannot reach the API (is it running on port 8787?). Run{' '}
-              <code className="login-code">npm run dev</code> — it starts both the server and Vite.
-            </div>
-          ) : null}
-
-          <button className="login-continue" type="submit" disabled={!canContinue}>
-            Continue
+          <button
+            className="login-continue"
+            type="submit"
+            disabled={!canContinue || apiState === 'checking'}
+          >
+            {submitting ? 'Signing in…' : apiState === 'checking' ? 'Connecting…' : 'Continue'}
           </button>
         </form>
 

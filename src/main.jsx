@@ -7,6 +7,8 @@ import './site-ui.css'
 import './slack-workspace.css'
 import './meet.css'
 import './todo.css'
+import './coding-workspace.css'
+import './responsive.css'
 import App from './App.jsx'
 
 createRoot(document.getElementById('root')).render(
