@@ -10,7 +10,7 @@ services:
     runtime: node
     plan: free
     rootDir: jira-ui
-    buildCommand: npm install
+    buildCommand: npm install --omit=dev --ignore-scripts
     startCommand: node server/index.js
     healthCheckPath: /api/health
     autoDeploy: true

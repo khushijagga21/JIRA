@@ -123,5 +123,8 @@ WebSocket isn't reaching the backend. Make sure the Render URL in `VITE_API_URL`
 **Blueprint error: "disks are not supported for free tier services"**
 Remove the `disk:` block from `render.yaml` (already fixed in the repo). Redeploy the blueprint. Free tier uses `/tmp/worksphere-data` instead — no persistent disk needed.
 
+**Deploy failed during build (`npm install` / better-sqlite3)**
+The blueprint uses `npm install --omit=dev --ignore-scripts` so Render only installs API packages (not React/Monaco) and skips native rebuild. The server falls back to Node’s built-in `node:sqlite` automatically.
+
 **Uploads disappeared after redeploy**
 Confirm `WORKSPHERE_DATA_DIR=/var/data` is set in Render and that the **Disk** named `worksphere-data` is mounted at `/var/data`.

@@ -36,12 +36,9 @@ function openDatabase(dbPath) {
     console.log('[workSphere] Database: better-sqlite3')
     return patchSqliteCompat(conn)
   } catch (err) {
-    const msg = String(err?.message ?? err)
-    const nativeMismatch =
-      err?.code === 'ERR_DLOPEN_FAILED' || msg.includes('NODE_MODULE_VERSION')
-    if (!nativeMismatch) throw err
     console.warn(
-      '[workSphere] better-sqlite3 could not load for this Node version; using built-in node:sqlite.',
+      '[workSphere] better-sqlite3 unavailable; using built-in node:sqlite.',
+      err?.message ?? err,
     )
     const { DatabaseSync } = require('node:sqlite')
     return patchSqliteCompat(new DatabaseSync(dbPath))
